@@ -191,7 +191,7 @@ public static class MacCanvasOwnedDialogInput {
             } while ($dialog -ne [IntPtr]::Zero -and [DateTime]::UtcNow -lt $deadline)
             if ($dialog -ne [IntPtr]::Zero) { throw 'The owned file picker did not close.' }
         }
-        (Find-FixtureElement 'Clipboard sharing' ([Windows.Automation.ControlType]::Button)).
+        (Find-FixtureElement 'Copy Mac text to Windows clipboard' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $null = Find-FixtureElement 'Clipboard' ([Windows.Automation.ControlType]::Text)
         Assert-FixtureElementAbsent 'Mac folder'
@@ -211,14 +211,14 @@ public static class MacCanvasOwnedDialogInput {
         Assert-FixtureElementAbsent 'Mac folder'
         (Find-FixtureElement 'Trust key & continue' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-        $null = Find-FixtureElement 'Encrypted SFTP. No files are automatically opened or replaced.' ([Windows.Automation.ControlType]::Text)
-        foreach ($name in @('Copy Mac text', 'Send Windows text')) {
+        $null = Find-FixtureElement 'Mac plain text is now on the Windows clipboard.' ([Windows.Automation.ControlType]::Text)
+        Assert-FixtureElementAbsent 'Clipboard'
+        Assert-FixtureElementAbsent 'Connect securely'
+        foreach ($name in @('Copy Mac text to Windows clipboard', 'Send Windows text to Mac clipboard')) {
             if (-not (Find-FixtureElement $name ([Windows.Automation.ControlType]::Button)).Current.IsEnabled) {
-                throw 'SSH clipboard controls did not become available in Clipboard.'
+                throw 'Direct clipboard controls did not become available after SSH authentication.'
             }
         }
-        (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
-            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         (Find-FixtureElement 'File transfer' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $null = Find-FixtureElement 'Files' ([Windows.Automation.ControlType]::Text)
@@ -256,17 +256,19 @@ public static class MacCanvasOwnedDialogInput {
         Cancel-OwnedPicker 'Receive source.txt' 'Receive a new file - existing files are not replaced'
         (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-        (Find-FixtureElement 'Clipboard sharing' ([Windows.Automation.ControlType]::Button)).
+        (Find-FixtureElement 'Copy Mac text to Windows clipboard' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-        $null = Find-FixtureElement 'Clipboard' ([Windows.Automation.ControlType]::Text)
-        $null = Find-FixtureElement 'Disconnect SSH' ([Windows.Automation.ControlType]::Button)
+        $null = Find-FixtureElement 'Mac plain text is now on the Windows clipboard.' ([Windows.Automation.ControlType]::Text)
+        Assert-FixtureElementAbsent 'Clipboard'
         Assert-FixtureElementAbsent 'Connect securely'
         Assert-FixtureElementAbsent 'Mac folder'
-        foreach ($name in @('Copy Mac text', 'Send Windows text')) {
+        foreach ($name in @('Copy Mac text to Windows clipboard', 'Send Windows text to Mac clipboard')) {
             if (-not (Find-FixtureElement $name ([Windows.Automation.ControlType]::Button)).Current.IsEnabled) {
-                throw 'Switching panels did not preserve the connected SSH clipboard.'
+                throw 'Toolbar clipboard actions did not reuse the connected SSH session.'
             }
         }
+        (Find-FixtureElement 'File transfer' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         (Find-FixtureElement 'Disconnect SSH' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
@@ -290,7 +292,15 @@ public static class MacCanvasOwnedDialogInput {
         $null = Find-FixtureElement 'Target: x86_64-pc-windows-msvc' ([Windows.Automation.ControlType]::Text)
         (Find-FixtureElement 'Done' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-        (Find-FixtureElement 'Clipboard sharing' ([Windows.Automation.ControlType]::Button)).
+        Assert-FixtureElementAbsent 'Clipboard sharing'
+        $filesBounds = (Find-FixtureElement 'File transfer' ([Windows.Automation.ControlType]::Button)).Current.BoundingRectangle
+        foreach ($name in @('Copy Mac text to Windows clipboard', 'Send Windows text to Mac clipboard')) {
+            $bounds = (Find-FixtureElement $name ([Windows.Automation.ControlType]::Button)).Current.BoundingRectangle
+            if ([Math]::Abs(($bounds.Y + $bounds.Height / 2) - ($filesBounds.Y + $filesBounds.Height / 2)) -gt 2) {
+                throw 'Clipboard buttons must share the main toolbar row.'
+            }
+        }
+        (Find-FixtureElement 'Copy Mac text to Windows clipboard' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         $null = Find-FixtureElement 'Share plain-text clipboard over VNC' ([Windows.Automation.ControlType]::CheckBox)
         $null = Find-FixtureElement 'Encrypted SSH clipboard' ([Windows.Automation.ControlType]::Text)

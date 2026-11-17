@@ -1150,7 +1150,7 @@ fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     Ok(())
 }
 
-fn keysym(text: &str, control: bool) -> Option<u32> {
+fn keysym(text: &str) -> Option<u32> {
     use slint::platform::Key;
     let special = [
         (Key::Backspace, 0xff08),
@@ -1192,9 +1192,7 @@ fn keysym(text: &str, control: bool) -> Option<u32> {
         return None;
     }
     let code = character as u32;
-    if control && (1..=26).contains(&code) {
-        return Some(u32::from(b'a') + code - 1);
-    }
+    // Slint uses control characters for named keys, including Control itself.
     if character.is_control() || (0xe000..=0xf8ff).contains(&code) {
         return None;
     }
@@ -1894,7 +1892,7 @@ pub fn run(
                 && app.get_clipboard_shared()
                 && (event.modifiers.meta || (event.modifiers.control && app.get_ctrl_as_command()))
                 && !event.modifiers.alt
-                && matches!(event.text.as_str(), "v" | "V" | "\u{16}")
+                && matches!(event.text.as_str(), "v" | "V")
             {
                 paste_windows(&app, &mut state)?;
             }
@@ -1916,7 +1914,7 @@ pub fn run(
                     state.modifiers[index] = modifiers[index];
                 }
             }
-            if let Some(symbol) = keysym(event.text.as_str(), event.modifiers.control) {
+            if let Some(symbol) = keysym(event.text.as_str()) {
                 let identifier = if symbol <= 255 {
                     char::from_u32(symbol)
                         .unwrap_or('\0')
@@ -2272,6 +2270,44 @@ pub fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_modifiers_never_become_shortcut_letters() {
+        use slint::platform::Key;
+        for key in [
+            Key::Control,
+            Key::ControlR,
+            Key::Shift,
+            Key::ShiftR,
+            Key::Alt,
+            Key::AltGr,
+            Key::Meta,
+            Key::MetaR,
+            Key::CapsLock,
+        ] {
+            let character: char = key.into();
+            assert_eq!(keysym(&character.to_string()), None, "{key:?}");
+        }
+    }
+
+    #[test]
+    fn shortcut_letters_and_named_navigation_keys_keep_their_keysyms() {
+        use slint::platform::Key;
+        for character in ['f', 'c', 'v', 'F', 'C', 'V'] {
+            assert_eq!(keysym(&character.to_string()), Some(character as u32));
+        }
+        for (key, symbol) in [
+            (Key::Return, 0xff0d),
+            (Key::Tab, 0xff09),
+            (Key::Backspace, 0xff08),
+            (Key::Escape, 0xff1b),
+            (Key::LeftArrow, 0xff51),
+            (Key::F1, 0xffbe),
+        ] {
+            let character: char = key.into();
+            assert_eq!(keysym(&character.to_string()), Some(symbol));
+        }
+    }
 
     #[test]
     fn continuous_reconnect_backoff_is_capped_but_never_exhausted() {

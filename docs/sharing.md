@@ -10,7 +10,8 @@ HEVC sessions use the encrypted SSH clipboard described below. Automatic VNC
 clipboard sharing is available in the standard VNC modes.
 
 1. Connect to the Mac.
-2. Open **Clipboard** and enable **Share plain-text clipboard over VNC**.
+2. Before SSH is connected, click **Copy Mac** in the toolbar to open the Clipboard
+   authentication panel and enable **Share plain-text clipboard over VNC**.
 3. Use Ctrl+C / Ctrl+V with the default Ctrl-to-Command mapping.
 
 Windows clipboard text is read only when you request a paste, not continuously
@@ -26,7 +27,7 @@ Extended Clipboard extension. Text is limited to 1 MiB; images, files, rich text
 embedded NULs, and unsupported formats are not transferred.
 
 VNC clipboard and desktop traffic are not encrypted. Use a trusted network or VPN.
-Use **Clipboard** for encrypted Unicode clipboard access when the Mac does not offer
+Use the toolbar clipboard buttons for encrypted Unicode clipboard access when the Mac does not offer
 the UTF-8 VNC extension.
 
 ## SSH setup and identity
@@ -35,7 +36,8 @@ On the Mac, enable **System Settings > General > Sharing > Remote Login** and
 allow your account. Screen Sharing alone does not provide SSH/SFTP.
 Keep both services behind a VPN rather than exposing ports 5900 or 22 publicly.
 
-Open **Clipboard** or **Files** in an active screen-sharing session. The host is the connected
+Click **Copy Mac**, **Send Windows**, or **Files** in an active screen-sharing session.
+The clipboard buttons open **Clipboard** for authentication when needed. The host is the connected
 Mac; the default SSH port is 22. Enter the Mac account login or choose its saved
 login. A separate classic VNC password is not an SSH account password.
 
@@ -111,7 +113,12 @@ does not prove that the server or its filesystem is uncompromised.
 
 ## Encrypted Unicode clipboard
 
-After connecting SSH, use **Copy Mac text** or **Send Windows text**.
+Use **Copy Mac** or **Send Windows**, each with a clipboard icon, in the main toolbar.
+The first action opens SSH authentication. After a successful connection the
+Clipboard panel closes and completes that action; subsequent clicks reuse SSH
+without reopening the panel. Closing authentication before connecting cancels
+the requested action. **Send Windows** sets the Mac clipboard, ready to
+paste in the Mac app with Ctrl+V when Ctrl-to-Command is enabled.
 These are explicit operations, independent of automatic VNC clipboard sharing.
 Use the same Mac account as the shared desktop. macOS may restrict pasteboard
 access when that account has no usable logged-in desktop session.

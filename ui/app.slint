@@ -270,7 +270,18 @@ export component App inherits Window {
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Button { text: "Quality"; icon: @image-url("../assets/tune.svg"); accessible-label: "Stream quality"; clicked => { root.quality-open = true; root.release-input(); } }
                 Button { icon: @image-url("../assets/audio.svg"); accessible-label: "Audio playback"; quiet: root.audio-muted; clicked => { root.audio-open = true; root.release-input(); } }
-                Button { icon: @image-url("../assets/clipboard.svg"); accessible-label: "Clipboard sharing"; quiet: true; enabled: root.connected; clicked => { root.open-clipboard(); } }
+                Button {
+                    text: "Copy Mac"; icon: @image-url("../assets/clipboard.svg");
+                    accessible-label: "Copy Mac text to Windows clipboard";
+                    enabled: root.connected && !root.files-busy && !root.files-connecting && !root.files-key-pending;
+                    clicked => { root.files-copy-text(); }
+                }
+                Button {
+                    text: "Send Windows"; icon: @image-url("../assets/clipboard.svg");
+                    accessible-label: "Send Windows text to Mac clipboard";
+                    enabled: root.connected && !root.files-busy && !root.files-connecting && !root.files-key-pending;
+                    clicked => { root.files-send-text(); }
+                }
                 Button { text: "Files"; icon: @image-url("../assets/folder.svg"); accessible-label: "File transfer"; quiet: !root.files-connected; enabled: root.connected; clicked => { root.open-files(); } }
                 Button { icon: @image-url("../assets/info.svg"); accessible-label: "About MacCanvas"; quiet: true; clicked => { root.about-open = true; root.release-input(); } }
                 Button { accessible-label: "Refresh"; icon: @image-url("../assets/refresh.svg"); quiet: true; enabled: root.connected; clicked => { root.refresh-desktop(); } }
@@ -533,7 +544,11 @@ export component App inherits Window {
                         animate opacity { duration: root.motion-enabled ? 500ms : 0ms; }
                     }
                 }
-                Text { text: root.status; color: root.ink; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                Text {
+                    text: root.connected && (root.files-connected || root.files-connecting)
+                        ? (root.files-busy ? root.files-progress-label : root.files-status) : root.status;
+                    color: root.ink; font-size: 12px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1;
+                }
                 TrafficPlot { accessible-role: groupbox; accessible-label: "Live network traffic, last 20 seconds"; width: 100px; samples: root.traffic; motion: root.motion-enabled; }
                 VerticalLayout {
                     width: 112px; spacing: 1px;

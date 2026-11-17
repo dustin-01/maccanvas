@@ -17,6 +17,12 @@ use tokio::sync::oneshot;
 use super::{State, window_handle};
 use crate::{App, FileRow};
 
+#[derive(Clone, Copy)]
+enum ClipboardAction {
+    Copy,
+    Send,
+}
+
 #[derive(Default)]
 pub(super) struct Files {
     client: Option<Client>,
@@ -30,11 +36,13 @@ pub(super) struct Files {
     received: u64,
     sent: u64,
     baseline: (u64, u64),
+    pending_clipboard: Option<ClipboardAction>,
 }
 
 impl Files {
     pub fn stop(&mut self, app: &App) {
         self.approval = None;
+        self.pending_clipboard = None;
         if let Some(client) = self.client.take() {
             client.close();
             self.retiring.push(client);
@@ -109,6 +117,9 @@ impl Files {
 
 fn fail(app: &App, error: impl std::fmt::Display) {
     app.set_files_error(error.to_string().into());
+    if !app.get_files_open() && !app.get_clipboard_open() {
+        super::notify(app, error);
+    }
 }
 
 fn rows(app: &App, files: &Files) {
@@ -178,6 +189,39 @@ fn prepare_ssh(app: &App, state: &mut State) -> Result<()> {
     Ok(())
 }
 
+fn clipboard_command(app: &App, state: &State, action: ClipboardAction) -> Result<()> {
+    let command = match action {
+        ClipboardAction::Copy => Command::CopyClipboard,
+        ClipboardAction::Send => {
+            let (sequence, text) =
+                native::read_snapshot(window_handle(app)?)?.ok_or_else(|| {
+                    Error::Clipboard("Windows has no plain text on the clipboard".into())
+                })?;
+            Command::SendClipboard {
+                text: zeroize::Zeroizing::new(clipboard::normalize(&text)),
+                sequence,
+            }
+        }
+    };
+    state.files.command(app, command)
+}
+
+fn request_clipboard(app: &App, state: &mut State, action: ClipboardAction) -> Result<()> {
+    state.release()?;
+    if app.get_files_connected() {
+        clipboard_command(app, state, action)?;
+        if !app.get_modal_open() {
+            app.invoke_focus_canvas();
+        }
+    } else {
+        prepare_ssh(app, state)?;
+        state.files.pending_clipboard = Some(action);
+        app.set_files_open(false);
+        app.set_clipboard_open(true);
+    }
+    Ok(())
+}
+
 pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let weak = app.as_weak();
     let open = state.clone();
@@ -214,6 +258,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let clipboard_closing = state.clone();
     app.on_close_clipboard(move || {
         if let Some(app) = weak.upgrade() {
+            clipboard_closing.borrow_mut().files.pending_clipboard = None;
             if app.get_files_connecting() || app.get_files_key_pending() {
                 clipboard_closing.borrow_mut().files.stop(&app);
             }
@@ -438,7 +483,8 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let copying = state.clone();
     app.on_files_copy_text(move || {
         if let Some(app) = weak.upgrade()
-            && let Err(error) = copying.borrow().files.command(&app, Command::CopyClipboard)
+            && let Err(error) =
+                request_clipboard(&app, &mut copying.borrow_mut(), ClipboardAction::Copy)
         {
             fail(&app, error);
         }
@@ -449,18 +495,9 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
         let Some(app) = weak.upgrade() else {
             return;
         };
-        let result = (|| {
-            let state = sending.borrow();
-            let (sequence, text) =
-                native::read_snapshot(window_handle(&app)?)?.ok_or_else(|| {
-                    Error::Clipboard("Windows has no plain text on the clipboard".into())
-                })?;
-            let text = zeroize::Zeroizing::new(clipboard::normalize(&text));
-            state
-                .files
-                .command(&app, Command::SendClipboard { text, sequence })
-        })();
-        if let Err(error) = result {
+        if let Err(error) =
+            request_clipboard(&app, &mut sending.borrow_mut(), ClipboardAction::Send)
+        {
             fail(&app, error);
         }
     });
@@ -515,6 +552,10 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 app.set_files_connecting(false);
                 app.set_files_busy(true);
                 app.set_files_status("SSH host verified. Reading your Mac folder...".into());
+                if app.get_clipboard_open() {
+                    app.set_clipboard_open(false);
+                    app.invoke_focus_canvas();
+                }
             }
             Event::Directory { path, entries } => {
                 state.files.directory = path.clone();
@@ -603,6 +644,13 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 state.files.stop(app);
             }
         }
+    }
+    if app.get_files_connected()
+        && !app.get_files_busy()
+        && let Some(action) = state.files.pending_clipboard.take()
+        && let Err(error) = clipboard_command(app, state, action)
+    {
+        fail(app, error);
     }
     if let Some(client) = &state.files.client {
         if client.is_finished() {

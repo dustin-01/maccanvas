@@ -160,13 +160,21 @@ The optional converter uses standard LOAS/WAVE pipes, not a linked viewer codec.
 
 ## Clipboard and files
 
-Open **Clipboard** to enable VNC plain-text sharing. Ctrl+V sends Windows text
+Before SSH is connected, click **Copy Mac** to open the Clipboard authentication
+panel and enable optional VNC plain-text sharing. Ctrl+V sends Windows text
 when pasting into the Mac; incoming Mac text can replace your Windows clipboard.
 Standard VNC supports Latin-1; Unicode requires a negotiated UTF-8 extension.
 HEVC sessions use the encrypted SSH clipboard instead of VNC clipboard sharing.
 
-For encrypted Unicode copy/paste, use **Copy Mac text** and **Send Windows text**
-in **Clipboard**. Use **Files** for file transfers. Both panels share one SSH
+For encrypted Unicode copy/paste, use **Copy Mac** and **Send Windows** (each with
+a clipboard icon) in the main toolbar alongside Quality, Audio, and Files.
+The first action opens
+**Clipboard** for SSH authentication; after connecting, the panel closes and
+the requested action runs. Later actions reuse the connection without a dialog.
+**Send Windows** updates the Mac clipboard; use Ctrl+V in the Mac app to paste.
+With **Ctrl shortcuts act as Command** enabled, Ctrl+F, Ctrl+C, and Ctrl+V
+send the corresponding Mac Command shortcuts while the remote desktop is focused.
+Use **Files** for file transfers. Both panels share one SSH
 connection, including the same login and host-key verification. Closing a panel
 keeps the established SSH connection open.
 
