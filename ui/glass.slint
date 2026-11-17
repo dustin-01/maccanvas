@@ -36,6 +36,7 @@ export component Button inherits Rectangle {
     property <bool> key-down: false;
     property <bool> pressed: pointer.pressed || key-down;
     property <color> foreground: root.primary ? #ffffff : GlassTheme.ink;
+    changed enabled => { if !root.enabled { root.key-down = false; } }
     min-width: max(36px, content.min-width);
     min-height: 34px;
     preferred-height: 36px;
@@ -83,8 +84,12 @@ export component Button inherits Rectangle {
         clicked => { keyboard.focus(); if root.enabled { root.clicked(); } }
     }
     keyboard := FocusScope {
-        x: 0px; width: 0px; enabled: root.enabled;
+        // Disabled FocusScopes ignore FocusOut, leaving their focus ring stuck.
+        x: 0px; width: 0px;
+        focus-on-click: root.enabled;
+        focus-on-tab-navigation: root.enabled;
         key-pressed(event) => {
+            if !root.enabled { return reject; }
             if event.text == Key.Space { root.key-down = true; return accept; }
             if event.text == Key.Return {
                 if !event.repeat && root.enabled { root.clicked(); }
@@ -93,6 +98,7 @@ export component Button inherits Rectangle {
             return reject;
         }
         key-released(event) => {
+            if !root.enabled { root.key-down = false; return reject; }
             if event.text == Key.Space {
                 if root.key-down && root.enabled { root.key-down = false; root.clicked(); }
                 return accept;

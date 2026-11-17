@@ -242,6 +242,14 @@ fallback, and static Microsoft C runtime. D3D11 decoding uses the installed
 Windows HEVC decoder component; NVIDIA NVDEC does not need it or a CUDA toolkit.
 Windows releases are built and tested in GitHub Actions.
 
+Check clipboard-button focus, pressed appearance, and separate action counts
+without touching either clipboard or connecting to a Mac:
+
+```powershell
+cargo test --example clipboard_buttons --locked
+cargo run --example clipboard_buttons --locked
+```
+
 To reuse the official audio converter in a source build, run this before the
 Cargo commands above (requires GitHub CLI). Changed converter inputs select a
 fresh source build instead:
