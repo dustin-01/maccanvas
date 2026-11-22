@@ -298,7 +298,7 @@ def automate(pid, port, action, extra=()):
         "powershell.exe", "-NoProfile", "-File", str(ROOT / "scripts" / "Gui-Fixture.ps1"),
         "-ProcessId", str(pid), "-Port", str(port), "-Action", action, *extra
     ], text=True, timeout=60 if action == "ssh-dialogs" else 30)
-    return json.loads(output) if action in ("bounds", "preview-bounds", "telemetry") else None
+    return json.loads(output) if action in ("bounds", "preview-bounds", "telemetry", "reveal-fullscreen") else None
 
 
 def send_input(event):
@@ -547,6 +547,7 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             time.sleep(0.5)
             fullscreen = automate(process.pid, fixture.port, "bounds")
             assert fullscreen["width"] > resized["width"]
+            automate(process.pid, fixture.port, "reveal-fullscreen")
             automate(process.pid, fixture.port, "exit-fullscreen")
             print("PASS: resize redraw and immersive full-screen round trip")
             fixture.pause_updates.set()

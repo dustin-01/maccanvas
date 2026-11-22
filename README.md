@@ -65,7 +65,8 @@ To open another session, choose **Connect** on another Mac’s card or use **New
 to enter its address. Connected Macs stay online as you switch. The sidebar
 shows live previews of the other desktops. Keyboard, mouse, and Mac audio follow
 the desktop in view. **Disconnect** closes the displayed session and returns
-you to another open Mac.
+you to another open Mac. In full screen, hold the pointer at the top edge for
+one second to reveal the traffic graph, Mac picker, and **Exit full screen**.
 
 **VNC password** is for the separate password configured in Screen Sharing,
 not the Mac account password; select a lossless VNC mode in **Quality** to use it.

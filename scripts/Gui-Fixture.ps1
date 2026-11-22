@@ -7,7 +7,7 @@ param(
     [ValidateSet('auto', 'hevc30', 'hevc60')][string]$StreamMode = 'auto',
     [string]$MacDisplay,
     [string]$MachineName = 'Fixture Mac',
-    [ValidateSet('connect', 'connect-another', 'cancel-pending-card', 'check-card-actions', 'select-switcher', 'preview-bounds', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
+    [ValidateSet('connect', 'connect-another', 'cancel-pending-card', 'check-card-actions', 'select-switcher', 'preview-bounds', 'bounds', 'fullscreen', 'reveal-fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 trap {
@@ -504,6 +504,39 @@ public static class MacCanvasOwnedDialogInput {
     'fullscreen' {
         $button = Find-FixtureElement 'Full screen' ([Windows.Automation.ControlType]::Button)
         $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'reveal-fullscreen' {
+        Add-Type -Namespace Fixture -Name Cursor -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetPhysicalCursorPos(int x, int y);'
+        $canvas = (Find-FixtureElement 'Remote desktop' $null).Current.BoundingRectangle
+        $x = [int]($canvas.X + $canvas.Width / 2)
+        $top = [int]$canvas.Y + 2
+        function Move-Pointer([int]$y) {
+            if (-not [Fixture.Cursor]::SetPhysicalCursorPos($x, $y)) { throw 'Could not move the test pointer.' }
+        }
+        function Assert-Hidden {
+            foreach ($name in @('Exit full screen', 'Switch Mac', 'Fullscreen traffic')) {
+                Assert-FixtureElementAbsent $name
+            }
+        }
+        Move-Pointer ([int]($canvas.Y + $canvas.Height / 2))
+        Start-Sleep -Milliseconds 350
+        Assert-Hidden
+        Move-Pointer $top
+        Start-Sleep -Milliseconds 450
+        Assert-Hidden
+        Move-Pointer ([int]($canvas.Y + $canvas.Height / 2))
+        Start-Sleep -Milliseconds 850
+        Assert-Hidden
+        Move-Pointer $top
+        Start-Sleep -Milliseconds 500
+        Assert-Hidden
+        $exitButton = Find-FixtureElement 'Exit full screen' ([Windows.Automation.ControlType]::Button)
+        Start-Sleep -Milliseconds 220
+        $exit = $exitButton.Current.BoundingRectangle
+        $picker = (Find-FixtureElement 'Switch Mac' ([Windows.Automation.ControlType]::ComboBox)).Current.BoundingRectangle
+        $null = Find-FixtureElement 'Fullscreen traffic' $null
+        if ($picker.Right -gt $exit.Left) { throw 'The Mac picker must sit to the left of Exit full screen.' }
+        @{ x=$picker.X; y=$picker.Y; width=$picker.Width; height=$picker.Height; scale=$exit.Width/156 } | ConvertTo-Json -Compress
     }
     'exit-fullscreen' {
         $button = Find-FixtureElement 'Exit full screen' ([Windows.Automation.ControlType]::Button)

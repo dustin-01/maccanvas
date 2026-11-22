@@ -20,6 +20,45 @@ component Caption inherits Text {
     vertical-alignment: center;
 }
 
+component MacPicker inherits Rectangle {
+    in property <[string]> names;
+    in-out property <int> current-index;
+    in property <bool> over-desktop;
+    out property <bool> menu-open: control.accessible-expanded;
+    callback picked(int);
+    callback pick-by-name(string);
+    forward-focus: control;
+    height: 32px;
+    // Keep the platform popup, keyboard navigation and accessibility actions.
+    control := ComboBox {
+        width: parent.width; height: parent.height; opacity: 0;
+        accessible-label: "Switch Mac";
+        model: root.names; current-index <=> root.current-index;
+        selected => { root.picked(self.current-index); }
+        accessible-action-set-value(value) => { root.pick-by-name(value); }
+    }
+    HorizontalLayout {
+        alignment: root.over-desktop ? end : start; spacing: 5px;
+        label := Text {
+            max-width: max(0px, root.width - 20px);
+            text: control.current-value; overflow: elide;
+            color: root.over-desktop ? white : GlassTheme.ink;
+            stroke-width: root.over-desktop ? 1.5px : 0px; stroke: #000b; stroke-style: outside;
+            font-size: 14px; font-weight: 500; vertical-alignment: center;
+            accessible-role: none;
+        }
+        Text {
+            text: "⌄"; color: label.color; font-size: 16px; vertical-alignment: center;
+            stroke-width: label.stroke-width; stroke: label.stroke; stroke-style: outside;
+            accessible-role: none;
+        }
+    }
+    if control.has-focus : Rectangle {
+        x: label.x; y: parent.height - 2px; height: 1px;
+        width: min(parent.width - self.x, label.width + 16px); background: GlassTheme.accent;
+    }
+}
+
 component TrafficPlot inherits Rectangle {
     in property <[TrafficBar]> samples;
     in property <color> incoming: GlassTheme.accent;
@@ -87,6 +126,28 @@ export component App inherits Window {
     in property <bool> connected: false;
     in property <bool> connecting: false;
     in property <bool> immersive: false;
+    callback fullscreen-pointer-y() -> float;
+    private property <float> pointer-y: -1;
+    private property <bool> fullscreen-menu-open;
+    private property <bool> controls-shown;
+    private property <length> fullscreen-controls-y: root.controls-shown ? 0px : -64px;
+    animate fullscreen-controls-y { duration: root.motion-enabled && root.immersive ? 180ms : 0ms; easing: linear; }
+    private property <bool> keep-controls: root.fullscreen-menu-open || (root.pointer-y >= 0 && root.pointer-y < 64);
+    changed keep-controls => { if !root.keep-controls { root.controls-shown = false; } }
+    changed immersive => {
+        root.controls-shown = false;
+        root.fullscreen-menu-open = false;
+        root.pointer-y = -1;
+    }
+    Timer {
+        interval: 50ms; running: root.immersive;
+        triggered => { root.pointer-y = root.fullscreen-pointer-y(); }
+    }
+    Timer {
+        interval: 1000ms;
+        running: root.immersive && !root.controls-shown && root.pointer-y >= 0 && root.pointer-y < 12;
+        triggered => { root.controls-shown = true; }
+    }
     in property <bool> pulse: false;
     in property <string> app-version;
     in property <string> build-date;
@@ -315,13 +376,12 @@ export component App inherits Window {
                     Text { text: "MacCanvas"; color: root.ink; font-size: 19px; font-weight: 700; }
                     Text { text: "A little closer to your Mac"; color: root.muted; font-size: 11px; }
                 }
-                if root.connected-macs.length > 0 : ComboBox {
-                    accessible-label: "Switch Mac";
-                    model: root.connected-macs;
+                if root.connected-macs.length > 0 : MacPicker {
+                    names: root.connected-macs;
                     current-index <=> root.active-mac-index;
                     width: root.compact-toolbar ? 104px : 150px;
-                    selected => { root.switch-mac(self.current-index); }
-                    accessible-action-set-value(value) => { root.switch-mac-by-name(value); }
+                    picked(index) => { root.switch-mac(index); }
+                    pick-by-name(value) => { root.switch-mac-by-name(value); }
                 }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
                 Button { text: root.compact-toolbar ? "" : "Quality"; icon: @image-url("../assets/tune.svg"); accessible-label: "Stream quality"; clicked => { root.quality-open = true; root.release-input(); } }
@@ -595,8 +655,9 @@ export component App inherits Window {
                         width: root.remote-cursor-width * root.remote-cursor-zoom * 1px;
                         height: root.remote-cursor-height * root.remote-cursor-zoom * 1px;
                     }
-                    if root.immersive : Rectangle {
-                        x: 12px; y: 12px; width: 310px; height: 40px;
+                    if root.immersive && root.fullscreen-controls-y > -64px : Rectangle {
+                        x: 12px; y: 12px + root.fullscreen-controls-y; width: 310px; height: 40px;
+                        accessible-role: groupbox; accessible-label: "Fullscreen traffic";
                         border-radius: 10px; background: #1c1c1ee8;
                         HorizontalLayout {
                             padding: 10px; spacing: 10px;
@@ -605,10 +666,20 @@ export component App inherits Window {
                             if root.show-fps : Text { text: root.fps-text; color: #ffffff; font-size: 12px; vertical-alignment: center; }
                         }
                     }
-                    if root.immersive : Button {
-                        x: parent.width - self.width - 12px; y: 12px;
-                        width: 156px; height: 32px; text: "Exit full screen";
-                        clicked => { root.fullscreen-requested(); }
+                    if root.immersive && root.fullscreen-controls-y > -64px : HorizontalLayout {
+                        x: parent.width - self.width - 12px; y: 12px + root.fullscreen-controls-y;
+                        width: self.preferred-width; height: 36px; spacing: 12px;
+                        if root.connected-macs.length > 0 : MacPicker {
+                            width: 190px; over-desktop: true;
+                            names: root.connected-macs; current-index <=> root.active-mac-index;
+                            picked(index) => { root.switch-mac(index); }
+                            pick-by-name(value) => { root.switch-mac-by-name(value); }
+                            changed menu-open => { root.fullscreen-menu-open = self.menu-open; }
+                        }
+                        Button {
+                            width: 156px; text: "Exit full screen";
+                            clicked => { root.fullscreen-requested(); }
+                        }
                     }
                 }
                 if !root.immersive : Text {

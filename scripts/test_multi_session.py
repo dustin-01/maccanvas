@@ -38,6 +38,26 @@ def click_in_viewer(window, point):
             raise ctypes.WinError(ctypes.get_last_error())
 
 
+def check_fullscreen_slide(process, window, fixture, scale):
+    bounds = automate(process.pid, fixture.port, "bounds")
+    # At rest the graph begins 12 logical pixels below the edge. Its panel
+    # crosses this otherwise black pixel only while sliding offscreen.
+    x, y = bounds["x"] + 45 * scale, bounds["y"] + 4 * scale
+    motion = wintypes.BOOL()
+    if not user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(motion), 0):
+        raise ctypes.WinError(ctypes.get_last_error())
+    assert pixel(window, x, y) == 0
+    user32.SetPhysicalCursorPos(round(bounds["x"] + bounds["width"] / 2),
+                                round(bounds["y"] + bounds["height"] / 2))
+    seen = set()
+    deadline = time.monotonic() + 0.6
+    while time.monotonic() < deadline:
+        seen.add(pixel(window, x, y))
+        time.sleep(0.005)
+    assert pixel(window, x, y) == 0
+    assert bool(seen - {0}) == bool(motion.value), f"Unexpected fullscreen slide: {seen}"
+
+
 def switch_card_and_check_transition(process, window, outgoing, incoming, preview):
     motion = wintypes.BOOL()
     if not user32.SystemParametersInfoW(0x1042, 0, ctypes.byref(motion), 0):  # SPI_GETCLIENTAREAANIMATION
@@ -162,6 +182,26 @@ def run(executable):
             assert collapsed["width"] > expanded["width"] + 200
             assert not first.disconnected.is_set() and not second.disconnected.is_set()
 
+            automate(process.pid, second.port, "fullscreen")
+            picker = automate(process.pid, second.port, "reveal-fullscreen")
+            scale = picker["scale"]
+            x = round(picker["x"] + picker["width"] / 2)
+            y = round(picker["y"] + picker["height"] / 2)
+            click_in_viewer(window, wintypes.POINT(x, y))
+            # Move onto the second row, below the reveal band. The popup must
+            # remain painted there until the user chooses a Mac or dismisses it.
+            row_one = round(picker["y"] + picker["height"] + 20 * scale)
+            row_two = round(row_one + 28 * scale)
+            user32.SetPhysicalCursorPos(x, row_two)
+            time.sleep(0.4)
+            assert pixel(window, x, row_two) not in (0, 0xffffffff), "Fullscreen picker popup disappeared"
+            click_in_viewer(window, wintypes.POINT(x, row_one))
+            check_desktop_and_input(process, window, first, second, "g")
+            picker = automate(process.pid, first.port, "reveal-fullscreen")
+            check_fullscreen_slide(process, window, first, picker["scale"])
+            automate(process.pid, first.port, "reveal-fullscreen")
+            automate(process.pid, first.port, "exit-fullscreen")
+            automate(process.pid, second.port, "select-switcher", ("-MachineName", second_name))
             second.expect_disconnect.set()
             automate(process.pid, second.port, "disconnect")
             wait(second.disconnected.is_set, process, second, "the selected Mac's socket to close")
@@ -174,7 +214,8 @@ def run(executable):
             assert second.error is None and first.error is None
             assert all((1, ord(k)) not in second.keys for k in "acef")
             assert all((1, ord(k)) not in first.keys for k in "bd")
-            print("PASS: independent live previews, card and collapsed-header switching, "
+            print("PASS: fullscreen hover delay, sliding controls and Mac picker, "
+                  "independent live previews, card and collapsed-header switching, "
                   "isolated input, surviving connection after disconnect, and cancelling a pending Mac")
         finally:
             user32.SetPhysicalCursorPos(original.x, original.y)

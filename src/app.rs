@@ -1904,6 +1904,25 @@ pub fn run(
         }
     });
     let weak = app.as_weak();
+    app.on_fullscreen_pointer_y(move || {
+        let Some(app) = weak.upgrade() else {
+            return -1.0;
+        };
+        let mut point = windows::Win32::Foundation::POINT::default();
+        // Observe the cursor without intercepting input to the Mac at the screen edge.
+        if unsafe { windows::Win32::UI::WindowsAndMessaging::GetCursorPos(&mut point) }.is_err() {
+            return -1.0;
+        }
+        let window = app.window();
+        let origin = window.position();
+        let size = window.size();
+        let (x, y) = (point.x - origin.x, point.y - origin.y);
+        if x < 0 || y < 0 || x as u32 >= size.width || y as u32 >= size.height {
+            return -1.0;
+        }
+        y as f32 / window.scale_factor()
+    });
+    let weak = app.as_weak();
     app.on_fullscreen_requested(move || {
         if let Some(app) = weak.upgrade() {
             let fullscreen = !app.window().is_fullscreen();
