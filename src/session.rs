@@ -59,6 +59,7 @@ pub struct Request {
 
 struct Control {
     cancelled: AtomicBool,
+    foreground: Arc<AtomicBool>,
     socket: Mutex<Option<TcpStream>>,
     gpu_frame: Mutex<Option<Arc<crate::render::gpu::nvdec::Frame>>>,
     frame_notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
@@ -72,6 +73,7 @@ impl Control {
     fn new(clipboard: bool) -> Self {
         Self {
             cancelled: AtomicBool::new(false),
+            foreground: Arc::new(AtomicBool::new(true)),
             socket: Mutex::new(None),
             gpu_frame: Mutex::new(None),
             frame_notifier: Mutex::new(None),
@@ -120,6 +122,10 @@ enum WriterCommand {
 }
 
 impl Session {
+    pub fn set_foreground(&self, foreground: bool) {
+        self.control.foreground.store(foreground, Ordering::Release);
+    }
+
     pub fn set_frame_notifier(&self, notifier: Arc<dyn Fn() + Send + Sync>) -> Result<()> {
         *self
             .control
@@ -460,8 +466,12 @@ fn run(
             use crate::clipboard::Notice;
             match notice {
                 Notice::Text(text) => {
+                    let mut pending = writer_control
+                        .clipboard_text
+                        .lock()
+                        .map_err(|_| Error::Clipboard("Clipboard queue is unavailable".into()))?;
                     if writer_control.clipboard_enabled.load(Ordering::Acquire) {
-                        *writer_control.clipboard_text.lock().map_err(|_| Error::Clipboard("Clipboard queue is unavailable".into()))? = Some(text);
+                        *pending = Some(text);
                     }
                 }
                 Notice::Mode(utf8) => { writer_control.clipboard_utf8.store(utf8, Ordering::Release); }

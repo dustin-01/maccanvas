@@ -16,7 +16,7 @@ One portable viewer. No extra DLLs or subscription.
 
 - **Sharp scaling:** larger desktops shrink to fit the window. Turn on **Fit view** in **Picture & connection** to enlarge smaller desktops too. Both modes preserve the Mac's aspect ratio.
 - **Visible cursor:** keep your normal Windows pointer and accessibility size.
-- **Easy connections:** searchable Mac list, quick connect, and an animated, collapsible sidebar.
+- **Multiple Macs.** Keep several desktops connected in one window. Click a Mac’s card to bring it forward, or use the Mac picker beside the app name when the sidebar is collapsed.
 - **Protected logins:** Windows Credential Manager storage; **Windows Hello is mandatory for every saved login**. Saved passwords cannot be displayed.
 - **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
 - **HEVC performance modes:** Apple's H.265 stream at up to 30 or 60 FPS, with encrypted control/video, a custom bitrate ceiling, Windows-selected GPU decoding, and a bundled native fallback.
@@ -60,6 +60,12 @@ or bypass Windows application-control policies.
 3. Choose **Mac account** and enter its username/password. Select **Connect to Mac**.
 4. To reconnect with Hello, enable **Save login in Credential Manager**.
    Credentials are saved only after a successful login.
+
+To open another session, choose **Connect** on another Mac’s card or use **New**
+to enter its address. Connected Macs stay online as you switch. The sidebar
+shows live previews of the other desktops. Keyboard, mouse, and Mac audio follow
+the desktop in view. **Disconnect** closes the displayed session and returns
+you to another open Mac.
 
 **VNC password** is for the separate password configured in Screen Sharing,
 not the Mac account password; select a lossless VNC mode in **Quality** to use it.

@@ -1,4 +1,8 @@
+mod desktop_events;
+mod desktops;
 mod files_ui;
+
+use desktops::Desktop;
 
 use std::{
     cell::RefCell,
@@ -13,7 +17,7 @@ use std::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use serde_json::json;
 use slint::{
-    ComponentHandle, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
+    ComponentHandle, Model, ModelRc, Rgba8Pixel, SharedPixelBuffer, VecModel,
     language::{PointerEventButton, PointerEventKind},
 };
 use uuid::Uuid;
@@ -45,10 +49,16 @@ struct Reconnect {
     profile: Profile,
     credentials: CredentialSource,
     retry_at: Instant,
+    previous: Arc<telemetry::Counters>,
 }
 
 fn reconnect_delay(attempt: u32) -> Duration {
     Duration::from_secs((1_u64 << attempt.saturating_sub(1).min(5)).min(30))
+}
+
+struct AudioInstall {
+    generation: Option<u64>,
+    result: mpsc::Receiver<Result<PathBuf>>,
 }
 
 struct State {
@@ -56,28 +66,21 @@ struct State {
     path: PathBuf,
     restart_data_directory: Option<PathBuf>,
     selected: Option<usize>,
-    session: Option<Session>,
-    connection_profile: Option<Profile>,
-    connection_credentials: Option<CredentialSource>,
-    reconnect: Option<Reconnect>,
-    reconnect_attempt: u32,
-    files: files_ui::Files,
+    active: Desktop,
+    background: Vec<Desktop>,
+    next_generation: u64,
+    preview_at: Instant,
+    wanted: Option<Uuid>,
+    draft_id: Uuid,
     retired: Vec<Session>,
+    retired_files: Vec<files_ui::Files>,
     audit: Scope,
     audit_reported: bool,
-    audio_install: Option<mpsc::Receiver<Result<PathBuf>>>,
+    audio_install: Option<AudioInstall>,
     audio_persist_at: Option<Instant>,
-    audio_restart: bool,
-    network_logged: Instant,
     clipboard: native::Watcher,
     pending_clipboard: Option<(u32, zeroize::Zeroizing<String>)>,
-    generation: u64,
-    frames: Frames,
-    frame: Option<Arc<Framebuffer>>,
-    gpu_frame: Option<Arc<maccanvas::render::gpu::nvdec::Frame>>,
     gpu_renderer: bool,
-    source_size: Option<Extent>,
-    viewport: Option<Viewport>,
     renderer: Renderer,
     ticket: u64,
     layout: (f32, f32, f32),
@@ -88,14 +91,20 @@ struct State {
     scroll_scale: input::ScrollScale,
     keys: HashMap<String, u32>,
     modifiers: [bool; 4],
-    monitor: Monitor,
-    frame_number: u64,
-    last_displayed_frame: u64,
     theme_checked: Instant,
     updater: Updater,
 }
 
 impl State {
+    fn select_profile(&mut self, id: Uuid) {
+        self.selected = self
+            .settings
+            .profiles
+            .iter()
+            .position(|profile| profile.id == id);
+        self.draft_id = id;
+    }
+
     fn persist(&self) -> Result<()> {
         self.audit.critical(
             "configuration.save.requested",
@@ -120,7 +129,8 @@ impl State {
     }
 
     fn send(&self, command: Command) -> Result<()> {
-        self.session
+        self.active
+            .session
             .as_ref()
             .ok_or_else(|| Error::Protocol("No active connection".into()))?
             .send(command)
@@ -144,7 +154,7 @@ impl State {
         let keys: Vec<_> = self.keys.drain().map(|(_, value)| value).collect();
         let modifiers = std::mem::take(&mut self.modifiers);
         let buttons = std::mem::take(&mut self.buttons);
-        if self.session.as_ref().is_none_or(Session::is_closed) {
+        if self.active.session.as_ref().is_none_or(Session::is_closed) {
             return Ok(());
         }
         for keysym in keys {
@@ -194,47 +204,100 @@ fn notify(app: &App, error: impl std::fmt::Display) {
 }
 
 fn model(app: &App, state: &State) {
-    let indices = filtered_indices(app, state);
-    let rows: Vec<_> = state
-        .settings
-        .profiles
+    let profiles = filtered_profiles(app, state);
+    let rows: Vec<_> = profiles
         .iter()
-        .enumerate()
-        .filter(|(index, _)| indices.contains(index))
-        .map(|(_, profile)| Machine {
-            name: profile.name.clone().into(),
-            detail: format!("{}:{}", profile.host, profile.port).into(),
-            saved: profile.has_saved_credentials,
+        .map(|profile| {
+            let desktop = state.desktop(profile.id);
+            Machine {
+                profile_id: profile.id.to_string().into(),
+                name: profile.name.as_str().into(),
+                detail: format!("{}:{}", profile.host, profile.port).into(),
+                saved: profile.has_saved_credentials,
+                active: state.active.id() == Some(profile.id),
+                connected: desktop.is_some_and(|d| d.connected),
+                connecting: desktop.is_some_and(|d| !d.connected),
+                thumbnail: desktop.map(|d| d.thumbnail.clone()).unwrap_or_default(),
+            }
         })
         .collect();
-    app.set_machines(ModelRc::from(Rc::new(VecModel::from(rows))));
+    let existing = app.get_machines();
+    if existing
+        .iter()
+        .map(|m| m.profile_id)
+        .eq(rows.iter().map(|m| m.profile_id.clone()))
+    {
+        for (index, machine) in rows.into_iter().enumerate() {
+            if existing.row_data(index).as_ref() != Some(&machine) {
+                existing.set_row_data(index, machine);
+            }
+        }
+    } else {
+        app.set_machines(ModelRc::new(VecModel::from(rows)));
+    }
+    let editing = state.editing_id();
     app.set_selected(
-        state
-            .selected
-            .and_then(|selected| indices.iter().position(|&index| index == selected))
+        profiles
+            .iter()
+            .position(|p| p.id == editing)
             .map_or(-1, |index| index as i32),
     );
+    let selected = state.desktop(editing);
+    app.set_selected_busy(selected.is_some());
+    app.set_selected_connecting(selected.is_some_and(|d| !d.connected));
+
+    let connected: Vec<_> = state.connected_profiles().collect();
+    let names: Vec<slint::SharedString> = connected
+        .iter()
+        .map(|profile| {
+            if connected
+                .iter()
+                .any(|other| other.id != profile.id && other.name == profile.name)
+            {
+                format!("{} ({}:{})", profile.name, profile.host, profile.port).into()
+            } else {
+                profile.name.as_str().into()
+            }
+        })
+        .collect();
+    if app.get_connected_macs().iter().ne(names.iter().cloned()) {
+        app.set_connected_macs(ModelRc::new(VecModel::from(names)));
+    }
+    let foreground = connected
+        .iter()
+        .position(|profile| Some(profile.id) == state.active.id());
+    app.set_active_mac_index(foreground.map_or(-1, |index| index as i32));
 }
 
-fn filtered_indices(app: &App, state: &State) -> Vec<usize> {
+fn filtered_profiles<'a>(app: &App, state: &'a State) -> Vec<&'a Profile> {
     let query = app.get_machine_filter().trim().to_lowercase();
+    let unsaved = std::iter::once(&state.active)
+        .chain(&state.background)
+        .filter_map(|desktop| desktop.connection_profile.as_ref())
+        .filter(|profile| {
+            !state
+                .settings
+                .profiles
+                .iter()
+                .any(|saved| saved.id == profile.id)
+        });
     state
         .settings
         .profiles
         .iter()
-        .enumerate()
-        .filter(|(_, profile)| {
+        .chain(unsaved)
+        .filter(|profile| {
             profile.name.to_lowercase().contains(&query)
                 || profile.host.to_lowercase().contains(&query)
         })
-        .map(|(index, _)| index)
         .collect()
 }
 
-fn row_index(app: &App, state: &State, index: i32) -> Result<usize> {
+fn row_id(app: &App, index: i32) -> Result<Uuid> {
     usize::try_from(index)
         .ok()
-        .and_then(|index| filtered_indices(app, state).get(index).copied())
+        .and_then(|index| app.get_machines().row_data(index))
+        .and_then(|machine| Uuid::parse_str(machine.profile_id.as_str()).ok())
         .ok_or_else(|| Error::Configuration("The selected Mac is no longer in this list".into()))
 }
 
@@ -268,7 +331,7 @@ fn profile_from_form(app: &App, state: &State) -> Result<Profile> {
             ));
     }
     let profile = Profile {
-        id: previous.map_or_else(Uuid::new_v4, |profile| profile.id),
+        id: previous.map_or(state.draft_id, |profile| profile.id),
         name: if name.is_empty() { host.clone() } else { name },
         host,
         port,
@@ -279,21 +342,10 @@ fn profile_from_form(app: &App, state: &State) -> Result<Profile> {
     Ok(profile)
 }
 
-fn select(app: &App, state: &Rc<RefCell<State>>, index: Option<usize>) -> Result<()> {
-    let profile = {
-        let mut state = state.borrow_mut();
-        state.selected = index;
-        index
-            .map(|index| {
-                state.settings.profiles.get(index).cloned().ok_or_else(|| {
-                    Error::Configuration("The selected machine no longer exists".into())
-                })
-            })
-            .transpose()?
-    };
+fn set_profile_form(app: &App, profile: Option<&Profile>) {
     if let Some(profile) = profile {
-        app.set_machine_name(profile.name.into());
-        app.set_host(profile.host.into());
+        app.set_machine_name(profile.name.as_str().into());
+        app.set_host(profile.host.as_str().into());
         app.set_port(profile.port.to_string().into());
         app.set_auth_mode(if profile.authentication == AuthMode::MacLogin {
             0
@@ -313,9 +365,35 @@ fn select(app: &App, state: &Rc<RefCell<State>>, index: Option<usize>) -> Result
     app.set_username("".into());
     app.set_password("".into());
     app.set_remember_password(false);
-    app.set_editor_open(true);
-    app.set_sidebar_open(true);
     app.set_confirm_delete(false);
+}
+
+fn select(app: &App, state: &Rc<RefCell<State>>, id: Option<Uuid>, edit: bool) -> Result<()> {
+    let profile = {
+        let mut state = state.borrow_mut();
+        let profile = id
+            .map(|id| {
+                state
+                    .settings
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.id == id)
+                    .or_else(|| state.desktop(id)?.connection_profile.as_ref())
+                    .cloned()
+                    .ok_or_else(|| Error::Configuration("The selected Mac no longer exists".into()))
+            })
+            .transpose()?;
+        if state.wanted != id {
+            state.wanted = None;
+        }
+        state.select_profile(id.unwrap_or_else(Uuid::new_v4));
+        profile
+    };
+    set_profile_form(app, profile.as_ref());
+    app.set_editor_open(edit);
+    if edit {
+        app.set_sidebar_open(true);
+    }
     app.set_error_text("".into());
     model(app, &state.borrow());
     Ok(())
@@ -339,14 +417,14 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     }
     let viewport = {
         let mut state = state.borrow_mut();
-        let Some(size) = state.source_size else {
+        let Some(size) = state.active.source_size else {
             return Ok(());
         };
         let viewport = Viewport::for_canvas(size, width, height, dpi, app.get_fit_view())?;
         state.layout = (width, height, dpi);
-        state.viewport = Some(viewport);
+        state.active.viewport = Some(viewport);
         state.ticket += 1;
-        if let Some(frame) = state.frame.clone() {
+        if let Some(frame) = state.active.frame.clone() {
             if state.gpu_renderer {
                 let mut pixels =
                     SharedPixelBuffer::<Rgba8Pixel>::new(frame.size.width, frame.size.height);
@@ -356,9 +434,9 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
                 state.renderer.request(Job {
                     frame,
                     viewport,
-                    generation: state.generation,
+                    generation: state.active.generation,
                     ticket: state.ticket,
-                    frame_number: state.frame_number,
+                    frame_number: state.active.frame_number,
                 })?;
             }
         }
@@ -384,66 +462,37 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
 }
 
 fn disconnect(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
-    let result = close_stream(app, state);
+    let closed = close_stream(app, state);
     {
         let mut state = state.borrow_mut();
-        state.connection_profile = None;
-        state.files.stop(app);
+        state.active.connection_profile = None;
+        state.active.files.stop(app);
+        if state.active.files.active() {
+            let retired = std::mem::take(&mut state.active.files);
+            state.retired_files.push(retired);
+        }
     }
     app.set_files_open(false);
-    result
+    closed.and(desktops::restore_survivor(app, state))
 }
 
 fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
-    let gpu = state
-        .borrow()
-        .session
-        .as_ref()
-        .map(Session::take_gpu_frame)
-        .transpose()?
-        .flatten();
-    let gpu_changed = gpu.is_some();
-    if let Some(frame) = gpu {
+    let changed = {
         let mut state = state.borrow_mut();
-        let size_changed = state.source_size != Some(frame.size);
-        app.set_remote_cursor_frame_width(frame.size.width as f32);
-        state.source_size = Some(frame.size);
-        state.frame = None;
-        state.frame_number += 1;
-        if state.gpu_renderer {
-            state.gpu_frame = Some(frame);
-        } else {
-            let rgba = frame.read_rgba()?;
-            state.frame = Some(Arc::new(Framebuffer {
-                size: frame.size,
-                rgba,
-            }));
-            state.gpu_frame = None;
+        let software = !state.gpu_renderer;
+        let old_size = state.active.source_size;
+        let changed = state.active.receive_frame(software)?;
+        if changed {
+            if let Some(size) = state.active.source_size {
+                app.set_remote_cursor_frame_width(size.width as f32);
+            }
+            if old_size != state.active.source_size {
+                guide(app, state.active.source_size);
+            }
+            app.window().request_redraw();
         }
-        if size_changed {
-            guide(app, state.source_size);
-        }
-        app.window().request_redraw();
-    }
-    let frame = state
-        .borrow()
-        .frames
-        .lock()
-        .map_err(|_| Error::Display("Frame queue is unavailable".into()))?
-        .take();
-    let changed = frame.is_some() || gpu_changed;
-    if let Some(frame) = frame {
-        let mut state = state.borrow_mut();
-        let size_changed = state.source_size != Some(frame.size);
-        app.set_remote_cursor_frame_width(frame.size.width as f32);
-        state.source_size = Some(frame.size);
-        state.gpu_frame = None;
-        state.frame = Some(frame);
-        state.frame_number += 1;
-        if size_changed {
-            guide(app, state.source_size);
-        }
-    }
+        changed
+    };
     let layout = (
         app.get_canvas_width(),
         app.get_canvas_height(),
@@ -452,16 +501,16 @@ fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     if changed || layout != state.borrow().layout {
         refresh_layout(app, state)?;
     }
-    if changed && state.borrow().frame_number == 1 {
+    if changed && state.borrow().active.frame_number == 1 {
         let state = state.borrow();
         state.audit.event(
             "media.hevc.presentation.frame_ready",
             Level::Info,
             json!({
-                "media.frame.width":state.source_size.map(|size| size.width),
-                "media.frame.height":state.source_size.map(|size| size.height),
+                "media.frame.width":state.active.source_size.map(|size| size.width),
+                "media.frame.height":state.active.source_size.map(|size| size.height),
                 "media.renderer.gpu":state.gpu_renderer,
-                "media.frame.gpu":state.gpu_frame.is_some(),
+                "media.frame.gpu":state.active.gpu_frame.is_some(),
                 "media.draw.width":app.get_draw_width(),
                 "media.draw.height":app.get_draw_height(),
             }),
@@ -471,10 +520,10 @@ fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     if let Some(rendered) = rendered {
         let valid = {
             let state = state.borrow();
-            rendered.generation == state.generation
+            rendered.generation == state.active.generation
                 && !state.gpu_renderer
                 && rendered.ticket <= state.ticket
-                && state.viewport == Some(rendered.viewport)
+                && state.active.viewport == Some(rendered.viewport)
         };
         if valid {
             let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(
@@ -484,9 +533,9 @@ fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
             pixels.make_mut_bytes().copy_from_slice(&rendered.rgba);
             app.set_frame_image(slint::Image::from_rgba8(pixels));
             let mut state = state.borrow_mut();
-            if rendered.frame_number != state.last_displayed_frame {
-                state.last_displayed_frame = rendered.frame_number;
-                state.monitor.displayed();
+            if rendered.frame_number != state.active.last_displayed_frame {
+                state.active.last_displayed_frame = rendered.frame_number;
+                state.active.monitor.displayed();
             }
         }
     }
@@ -497,26 +546,32 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     let result = {
         let mut state = state.borrow_mut();
         let release = state.release();
-        let session = state.session.take();
-        state.generation += 1;
-        state.frame = None;
-        state.gpu_frame = None;
-        state.source_size = None;
-        state.viewport = None;
-        state.monitor = Monitor::new(Instant::now());
-        state.frame_number = 0;
-        state.last_displayed_frame = 0;
-        state.connection_credentials = None;
-        state.reconnect = None;
-        state.reconnect_attempt = 0;
-        state.audio_restart = false;
+        let session = state.active.session.take();
+        state.active.generation = 0;
+        state.active.connected = false;
+        state.active.status = "Disconnected".into();
+        state.active.frame = None;
+        state.active.gpu_frame = None;
+        state.active.source_size = None;
+        state.active.viewport = None;
+        state.active.monitor = Monitor::new(Instant::now());
+        state.active.frame_number = 0;
+        state.active.last_displayed_frame = 0;
+        state.active.connection_credentials = None;
+        state.active.reconnect = None;
+        state.active.reconnect_attempt = 0;
+        state.active.audio_restart = false;
+        state.active.files.clear_pending_clipboard();
         state.clipboard = native::Watcher::default();
         state.pending_clipboard = None;
-        state
+        let clear_frames = state
+            .active
             .frames
             .lock()
-            .map_err(|_| Error::Display("Frame queue is unavailable".into()))?
-            .take();
+            .map(|mut frames| {
+                frames.take();
+            })
+            .map_err(|_| Error::Display("Frame queue is unavailable".into()));
         let close = if let Some(session) = session {
             let recorded =
                 session
@@ -528,7 +583,7 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         } else {
             Ok(())
         };
-        release.and(close)
+        release.and(clear_frames).and(close)
     };
     app.set_connected(false);
     app.set_hevc_active(false);
@@ -550,21 +605,21 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     result
 }
 
-fn start_connection(
+#[allow(clippy::too_many_arguments)]
+fn open_desktop(
     app: &App,
     state: &mut State,
     profile: Profile,
     credentials: CredentialSource,
     remember: bool,
+    streaming: StreamSettings,
+    foreground: bool,
     events: &mpsc::Sender<(u64, Event)>,
-) -> Result<()> {
-    if state.updater.installing {
-        return Err(Error::Update(
-            "Finish the application update before connecting".into(),
+) -> Result<Desktop> {
+    if state.updater.installing || state.audit.audit().failure().is_some() {
+        return Err(Error::Configuration(
+            "Connections are currently unavailable".into(),
         ));
-    }
-    if state.session.is_some() || state.reconnect.is_some() {
-        return Err(Error::Protocol("A connection is already active".into()));
     }
     if state.retired.len() >= 8 {
         return Err(Error::Protocol(
@@ -572,39 +627,29 @@ fn start_connection(
         ));
     }
     profile.validate()?;
-    state
-        .settings
-        .streaming
-        .validate_authentication(profile.authentication)?;
+    streaming.validate_authentication(profile.authentication)?;
     let hwnd = window_handle(app)?;
     let reconnect_credentials = credentials.clone();
-    state.generation += 1;
-    state.frames = Arc::new(Mutex::new(None));
-    state.gpu_frame = None;
-    app.set_remote_cursor_ready(false);
-    app.set_remote_cursor_hidden(false);
-    state.monitor = Monitor::new(Instant::now());
-    state.frame_number = 0;
-    state.last_displayed_frame = 0;
-    state.clipboard = native::Watcher::default();
-    state.pending_clipboard = None;
-    state.network_logged = Instant::now();
-    state.files.reset_network();
+    let mut desktop = Desktop::new(streaming);
+    state.next_generation += 1;
+    desktop.generation = state.next_generation;
+    desktop.audio_missing = app.get_audio_codec_missing();
     let request = Request {
         audit: state.audit.child(json!({
             "profile.id":profile.id, "server.address":profile.host, "server.port":profile.port,
-            "vnc.session.generation":state.generation,
+            "vnc.session.generation":desktop.generation,
         })),
-        clipboard: state.settings.clipboard_enabled,
+        clipboard: foreground && state.settings.clipboard_enabled,
         profile: profile.clone(),
         credentials,
-        streaming: state.settings.streaming,
+        streaming,
         audio: state.settings.audio,
         remember,
         window: hwnd,
-        generation: state.generation,
+        generation: desktop.generation,
     };
-    let session = Session::start(request, events.clone(), state.frames.clone())?;
+    let session = Session::start(request, events.clone(), desktop.frames.clone())?;
+    session.set_foreground(foreground);
     let weak = Arc::new(Mutex::new(app.as_weak()));
     let queued = Arc::new(AtomicBool::new(false));
     session.set_frame_notifier(Arc::new(move || {
@@ -627,12 +672,48 @@ fn start_connection(
             queued.store(false, Ordering::Release);
         }
     }))?;
-    state.connection_profile = Some(profile);
-    state.connection_credentials = Some(reconnect_credentials);
-    state.session = Some(session);
-    app.set_error_text("".into());
-    app.set_connecting(true);
-    app.set_status("Verifying and connecting...".into());
+    desktop.connection_profile = Some(profile);
+    desktop.connection_credentials = Some(reconnect_credentials);
+    desktop.session = Some(session);
+    desktop.status = "Verifying and connecting...".into();
+    Ok(desktop)
+}
+
+fn start_connection(
+    app: &App,
+    state: &mut State,
+    profile: Profile,
+    source: CredentialSource,
+    remember: bool,
+    events: &mpsc::Sender<(u64, Event)>,
+) -> Result<()> {
+    if state.desktop(profile.id).is_some() {
+        return Err(Error::Configuration(
+            "This Mac already has an open connection".into(),
+        ));
+    }
+    let id = profile.id;
+    let foreground = state.active.id().is_none();
+    let desktop = open_desktop(
+        app,
+        state,
+        profile,
+        source,
+        remember,
+        state.settings.streaming,
+        foreground,
+        events,
+    )?;
+    if foreground {
+        state.active = desktop;
+        state.clipboard = Default::default();
+        state.pending_clipboard = None;
+        desktops::show(app, state);
+    } else {
+        state.background.push(desktop);
+        state.wanted = Some(id);
+    }
+    model(app, state);
     Ok(())
 }
 
@@ -649,28 +730,30 @@ fn apply_streaming(
     }
     let reconnect = {
         let mut state = state.borrow_mut();
-        let reconnect = if state
+        let reconnect = if let Some(session) = state
+            .active
             .session
             .as_ref()
-            .is_some_and(|session| session.requires_reconnect(settings) || restart_audio)
+            .filter(|session| session.requires_reconnect(settings) || restart_audio)
         {
-            let profile = state.connection_profile.clone().ok_or_else(|| {
+            let profile = state.active.connection_profile.clone().ok_or_else(|| {
                 Error::Protocol("The active connection profile is unavailable".into())
             })?;
             settings.validate_authentication(profile.authentication)?;
-            let credentials = state.connection_credentials.clone().ok_or_else(|| {
+            let credentials = state.active.connection_credentials.clone().ok_or_else(|| {
                 Error::Credential("The active connection cannot be restarted".into())
             })?;
             state.audit.critical(
                 "session.reconnect.requested",
                 Level::Info,
                 json!({
-                    "profile.id":profile.id, "rfb.streaming.previous":state.settings.streaming,
-                    "rfb.streaming":settings, "vnc.session.generation":state.generation,
+                    "profile.id":profile.id, "rfb.streaming.previous":state.active.streaming,
+                    "rfb.streaming":settings, "vnc.session.generation":state.active.generation,
                     "session.reconnect.reason":if restart_audio { "audio" } else { "stream_settings" },
                 }),
             )?;
             Some(Reconnect {
+                previous: session.counters.clone(),
                 profile,
                 credentials,
                 retry_at: Instant::now(),
@@ -684,122 +767,40 @@ fn apply_streaming(
             state.settings.streaming = previous;
             return Err(error);
         }
+        state.active.streaming = settings;
         if reconnect.is_none()
-            && let Some(session) = &state.session
+            && let Some(session) = &state.active.session
         {
             session.send(Command::Configure(settings))?;
         }
         reconnect
     };
+    let mut closed = Ok(());
     if let Some(reconnect) = reconnect {
-        close_stream(app, state)?;
+        closed = close_stream(app, state);
         {
             let mut state = state.borrow_mut();
-            state.reconnect = Some(reconnect);
-            state.reconnect_attempt = 1;
+            state.active.reconnect = Some(reconnect);
+            state.active.reconnect_attempt = 1;
         }
         app.set_connecting(true);
-        app.set_status(format!("Switching to {}...", settings.encoding.label()).into());
+        state.borrow_mut().active.status = format!("Switching to {}...", settings.encoding.label());
+        app.set_status(state.borrow().active.status.as_str().into());
+        model(app, &state.borrow());
     }
     stream_summary(app, settings);
     app.set_quality_open(false);
     app.set_error_text("".into());
-    Ok(())
-}
-
-fn connection_ended(app: &App, state: &Rc<RefCell<State>>, retryable: bool) -> Result<()> {
-    let pending = {
-        let state = state.borrow();
-        if retryable
-            && (app.get_connected() || state.reconnect_attempt != 0)
-            && state.session.as_ref().is_some_and(Session::uses_hevc)
-            && state.audit.audit().failure().is_none()
-        {
-            let attempt = state.reconnect_attempt.saturating_add(1);
-            let delay = reconnect_delay(attempt);
-            let profile = state.connection_profile.clone().ok_or_else(|| {
-                Error::Protocol("The interrupted connection profile is unavailable".into())
-            })?;
-            let credentials = state.connection_credentials.clone().ok_or_else(|| {
-                Error::Credential("The interrupted connection cannot be restarted".into())
-            })?;
-            state.audit.critical(
-                "session.reconnect.scheduled",
-                Level::Warn,
-                json!({
-                    "profile.id":profile.id, "session.reconnect.reason":"connection_interrupted",
-                    "session.reconnect.attempt":attempt, "session.reconnect.delay_ms":delay.as_millis() as u64,
-                }),
-            )?;
-            Some((
-                Reconnect {
-                    profile,
-                    credentials,
-                    retry_at: Instant::now() + delay,
-                },
-                attempt,
-                delay,
-            ))
-        } else {
-            None
-        }
-    };
-    disconnect(app, state)?;
-    if let Some((pending, attempt, delay)) = pending {
-        {
-            let mut state = state.borrow_mut();
-            state.reconnect = Some(pending);
-            state.reconnect_attempt = attempt;
-        }
-        app.set_connecting(true);
-        app.set_status(
-            format!(
-                "Connection interrupted. Reconnecting in {}s (attempt {attempt}); Cancel to stop.",
-                delay.as_secs()
-            )
-            .into(),
-        );
-    }
-    Ok(())
-}
-
-fn tick_reconnect(
-    app: &App,
-    state: &Rc<RefCell<State>>,
-    events: &mpsc::Sender<(u64, Event)>,
-) -> Result<()> {
-    let pending = {
-        let mut state = state.borrow_mut();
-        if state.retired.is_empty()
-            && state
-                .reconnect
-                .as_ref()
-                .is_some_and(|pending| Instant::now() >= pending.retry_at)
-        {
-            state.reconnect.take()
-        } else {
-            None
-        }
-    };
-    if let Some(pending) = pending {
-        let result = start_connection(
-            app,
-            &mut state.borrow_mut(),
-            pending.profile,
-            pending.credentials,
-            false,
-            events,
-        );
-        if let Err(error) = result {
-            disconnect(app, state)?;
-            return Err(error);
-        }
-    }
-    Ok(())
+    closed
 }
 
 fn paste_windows(app: &App, state: &mut State) -> Result<()> {
-    if state.session.as_ref().is_some_and(Session::uses_hevc) {
+    if state
+        .active
+        .session
+        .as_ref()
+        .is_some_and(Session::uses_hevc)
+    {
         return Err(Error::Clipboard(
             "Use the encrypted SSH controls in Clipboard while using HEVC".into(),
         ));
@@ -807,6 +808,7 @@ fn paste_windows(app: &App, state: &mut State) -> Result<()> {
     let owner = window_handle(app)?;
     if let Some((sequence, text)) = state.clipboard.paste(owner)? {
         let session = state
+            .active
             .session
             .as_ref()
             .ok_or_else(|| Error::Clipboard("Connect to your Mac first".into()))?;
@@ -817,7 +819,7 @@ fn paste_windows(app: &App, state: &mut State) -> Result<()> {
 }
 
 fn tick_clipboard(app: &App, state: &mut State) -> Result<()> {
-    let Some(session) = &state.session else {
+    let Some(session) = &state.active.session else {
         return Ok(());
     };
     if session.uses_hevc() {
@@ -1024,57 +1026,92 @@ fn window_handle(app: &App) -> Result<isize> {
     }
 }
 
-fn tick_audio(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
-    let result = {
-        let mut state = state.borrow_mut();
-        if state
-            .audio_persist_at
-            .is_some_and(|deadline| Instant::now() >= deadline)
-        {
-            state.audio_persist_at = None;
-            state.persist()?;
-        }
-        match state.audio_install.as_ref().map(mpsc::Receiver::try_recv) {
-            Some(Ok(result)) => {
-                state.audio_install = None;
-                Some(result)
-            }
-            Some(Err(mpsc::TryRecvError::Disconnected)) => {
-                state.audio_install = None;
-                Some(Err(Error::Audio {
-                    code: None,
-                    message: "Audio installation stopped unexpectedly".into(),
-                }))
-            }
-            _ => None,
-        }
+fn tick_audio(app: &App, shared: &Rc<RefCell<State>>) -> Result<()> {
+    let mut state = shared.borrow_mut();
+    if state
+        .audio_persist_at
+        .is_some_and(|deadline| Instant::now() >= deadline)
+    {
+        state.audio_persist_at = None;
+        state.persist()?;
+    }
+    let Some(install) = &state.audio_install else {
+        return Ok(());
     };
-    if let Some(result) = result {
-        app.set_audio_installing(false);
-        match result {
-            Ok(_) => {
-                app.set_audio_codec_missing(false);
-                app.set_audio_status("Audio codec installed.".into());
-                if app.get_connected() && app.get_hevc_active() {
-                    let settings = state.borrow().settings.streaming;
-                    apply_streaming(app, state, settings, true)?;
-                } else if app.get_connecting() {
-                    state.borrow_mut().audio_restart = true;
-                }
+    let result = match install.result.try_recv() {
+        Ok(result) => result,
+        Err(mpsc::TryRecvError::Empty) => return Ok(()),
+        Err(mpsc::TryRecvError::Disconnected) => Err(Error::Audio {
+            code: None,
+            message: "Audio installation stopped unexpectedly".into(),
+        }),
+    };
+    let generation = install.generation;
+    state.audio_install = None;
+    app.set_audio_installing(false);
+    let foreground = match generation {
+        Some(generation) => state.active.session.is_some() && state.active.generation == generation,
+        None => state.active.id().is_none(),
+    };
+
+    if let Err(error) = result {
+        state.audit.critical(
+            "component.audio.install.failed",
+            Level::Error,
+            maccanvas::audit::error_attributes(&error),
+        )?;
+        if foreground {
+            state.active.audio_status = error.to_string();
+            state.active.audio_missing = true;
+            app.set_audio_status(state.active.audio_status.as_str().into());
+            app.set_audio_codec_missing(true);
+            return Err(error);
+        }
+        if let Some(desktop) = generation.and_then(|g| state.desktop_mut(g)) {
+            desktop.audio_status = error.to_string();
+            desktop.audio_missing = true;
+        }
+        return Ok(());
+    }
+
+    // The codec is installed once for Windows. Other open Macs can use it
+    // on their next connection, or when the user chooses Retry audio.
+    let State {
+        active, background, ..
+    } = &mut *state;
+    for desktop in std::iter::once(active).chain(background) {
+        if desktop.audio_missing || desktop.id().is_none() || Some(desktop.generation) == generation
+        {
+            desktop.audio_missing = false;
+            desktop.audio_status = if desktop.connected && desktop.streaming.encoding.is_hevc() {
+                "Audio codec installed. Retry audio to hear this Mac."
+            } else {
+                "Audio codec installed."
             }
-            Err(error) => {
-                state.borrow().audit.critical(
-                    "component.audio.install.failed",
-                    Level::Error,
-                    maccanvas::audit::error_attributes(&error),
-                )?;
-                app.set_audio_status(error.to_string().into());
-                app.set_audio_codec_missing(true);
-                return Err(error);
-            }
+            .into();
         }
     }
-    Ok(())
+    app.set_audio_codec_missing(false);
+    app.set_audio_status(state.active.audio_status.as_str().into());
+    let Some(owner) = generation.and_then(|g| state.desktop_mut(g)) else {
+        return Ok(());
+    };
+    if !owner.streaming.encoding.is_hevc() || owner.session.as_ref().is_none_or(Session::is_closed)
+    {
+        return Ok(());
+    }
+    if !owner.connected {
+        owner.audio_restart = true;
+        return Ok(());
+    }
+    let settings = owner.streaming;
+    let id = owner.id().expect("a live desktop has a profile");
+    drop(state);
+    if foreground {
+        apply_streaming(app, shared, settings, true)
+    } else {
+        desktop_events::restart_background_audio(app, shared, id)
+    }
 }
 
 fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
@@ -1291,32 +1328,25 @@ pub fn run(
     guide(&app, None);
     let (events, receiver) = mpsc::channel::<(u64, Event)>();
     let state = Rc::new(RefCell::new(State {
+        active: Desktop::new(settings.streaming),
+        background: Vec::new(),
+        next_generation: 0,
+        preview_at: Instant::now(),
+        wanted: None,
+        draft_id: Uuid::new_v4(),
         settings,
         path,
         restart_data_directory,
         selected: None,
-        session: None,
-        connection_profile: None,
-        connection_credentials: None,
-        reconnect: None,
-        reconnect_attempt: 0,
-        files: files_ui::Files::default(),
         retired: Vec::new(),
+        retired_files: Vec::new(),
         audit,
         audit_reported: false,
         audio_install: None,
         audio_persist_at: None,
-        audio_restart: false,
-        network_logged: Instant::now(),
         clipboard: native::Watcher::default(),
         pending_clipboard: None,
-        generation: 0,
-        frames: Arc::new(Mutex::new(None)),
-        frame: None,
-        gpu_frame: None,
         gpu_renderer: false,
-        source_size: None,
-        viewport: None,
         renderer: Renderer::new(),
         ticket: 0,
         layout: (0.0, 0.0, 0.0),
@@ -1327,9 +1357,6 @@ pub fn run(
         scroll_scale: input::ScrollScale::system()?,
         keys: HashMap::new(),
         modifiers: [false; 4],
-        monitor: Monitor::new(Instant::now()),
-        frame_number: 0,
-        last_displayed_frame: 0,
         theme_checked: Instant::now(),
         updater,
     }));
@@ -1354,7 +1381,7 @@ pub fn run(
             slint::RenderingState::BeforeRendering => {
                 let (frame, generation, number, has_frame) = {
                     let state = render_state.borrow();
-                    (state.gpu_frame.clone(), state.generation, state.frame_number, state.source_size.is_some())
+                    (state.active.gpu_frame.clone(), state.active.generation, state.active.frame_number, state.active.source_size.is_some())
                 };
                 if generation != render_generation {
                     shared_gpu = None;
@@ -1425,9 +1452,9 @@ pub fn run(
                 if let Some(interop) = shared_gpu.as_mut() { interop.finish(); }
                 if let Some((generation, number)) = presented.take() {
                     let mut state = render_state.borrow_mut();
-                    if state.generation == generation && state.last_displayed_frame != number {
-                        state.last_displayed_frame = number;
-                        state.monitor.displayed();
+                    if state.active.generation == generation && state.active.last_displayed_frame != number {
+                        state.active.last_displayed_frame = number;
+                        state.active.monitor.displayed();
                     }
                 }
             }
@@ -1485,8 +1512,6 @@ pub fn run(
         match result {
             Ok(()) => {
                 app.set_error_text("".into());
-                app.set_connecting(true);
-                app.set_status("Verifying and connecting...".into());
             }
             Err(error) => notify(&app, error),
         }
@@ -1514,7 +1539,7 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = update_state.borrow_mut();
-            if state.session.is_some() || state.reconnect.is_some() || state.files.active() || state.audio_install.is_some() {
+            if state.active.id().is_some() || !state.background.is_empty() || state.active.files.active() || !state.retired_files.is_empty() || state.audio_install.is_some() {
                 return Err(Error::Update(
                     "Disconnect from the Mac and wait for SSH cleanup before updating and restarting".into(),
                 ));
@@ -1586,7 +1611,7 @@ pub fn run(
             let result = (|| -> Result<()> {
                 let mut state = clipboard_state.borrow_mut();
                 let enabled = app.get_clipboard_shared();
-                if let Some(session) = &state.session {
+                if let Some(session) = &state.active.session {
                     session.share_clipboard(enabled)?;
                 }
                 state.settings.clipboard_enabled = enabled;
@@ -1657,7 +1682,7 @@ pub fn run(
     let new_state = state.clone();
     app.on_new_machine(move || {
         if let Some(app) = weak.upgrade()
-            && let Err(error) = select(&app, &new_state, None)
+            && let Err(error) = select(&app, &new_state, None, true)
         {
             notify(&app, error);
         }
@@ -1666,10 +1691,10 @@ pub fn run(
     let selected_state = state.clone();
     app.on_select_machine(move |index| {
         if let Some(app) = weak.upgrade() {
-            let selected = row_index(&app, &selected_state.borrow(), index);
+            let selected = row_id(&app, index);
             match selected {
-                Ok(index) => {
-                    if let Err(error) = select(&app, &selected_state, Some(index)) {
+                Ok(id) => {
+                    if let Err(error) = select(&app, &selected_state, Some(id), true) {
                         notify(&app, error);
                     }
                 }
@@ -1678,12 +1703,68 @@ pub fn run(
         }
     });
     let weak = app.as_weak();
+    let cards = state.clone();
+    app.on_activate_machine(move |row| {
+        let Some(app) = weak.upgrade() else { return };
+        let result = (|| -> Result<()> {
+            let id = row_id(&app, row)?;
+            let (connected, pending) = {
+                let state = cards.borrow();
+                let desktop = state.desktop(id);
+                (desktop.is_some_and(|d| d.connected), desktop.is_some())
+            };
+            if connected {
+                desktops::activate(&app, &cards, id)
+            } else {
+                select(&app, &cards, Some(id), pending)
+            }
+        })();
+        if let Err(error) = result {
+            notify(&app, error);
+        }
+    });
+    let weak = app.as_weak();
+    let switcher = state.clone();
+    app.on_switch_mac(move |index| {
+        let Some(app) = weak.upgrade() else { return };
+        let id = usize::try_from(index)
+            .ok()
+            .and_then(|i| switcher.borrow().connected_profiles().nth(i).map(|p| p.id));
+        if let Some(id) = id
+            && let Err(error) = desktops::activate(&app, &switcher, id)
+        {
+            notify(&app, error);
+        }
+    });
+    let weak = app.as_weak();
+    app.on_switch_mac_by_name(move |name| {
+        if let Some(app) = weak.upgrade()
+            && let Some(index) = app
+                .get_connected_macs()
+                .iter()
+                .position(|label| label == name)
+        {
+            app.invoke_switch_mac(index as i32);
+        }
+    });
+    let weak = app.as_weak();
+    let cancel_state = state.clone();
+    app.on_cancel_selected_connection(move || {
+        if let Some(app) = weak.upgrade()
+            && let Err(error) = desktops::cancel_selected(&app, &cancel_state)
+        {
+            notify(&app, error);
+        }
+    });
+    let weak = app.as_weak();
     let quick_state = state.clone();
     app.on_quick_connect(move |index| {
         let Some(app) = weak.upgrade() else { return };
-        let index = row_index(&app, &quick_state.borrow(), index);
-        match index.and_then(|index| select(&app, &quick_state, Some(index))) {
-            Ok(()) if app.get_has_saved() => app.invoke_connect_requested(),
+        let id = row_id(&app, index);
+        match id.and_then(|id| select(&app, &quick_state, Some(id), true)) {
+            Ok(()) if app.get_has_saved() && !app.get_selected_busy() => {
+                app.invoke_connect_requested()
+            }
             Ok(()) => (),
             Err(error) => notify(&app, error),
         }
@@ -1732,6 +1813,11 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = save_state.borrow_mut();
+            if state.desktop(state.editing_id()).is_some() {
+                return Err(Error::Configuration(
+                    "Disconnect this Mac before editing it".into(),
+                ));
+            }
             let profile = profile_from_form(&app, &state)?;
             if let Some(index) = state.selected {
                 state.settings.profiles[index] = profile;
@@ -1759,6 +1845,11 @@ pub fn run(
                 .selected
                 .ok_or_else(|| Error::Configuration("Select a machine first".into()))?;
             let id = state.settings.profiles[index].id;
+            if state.desktop(id).is_some() {
+                return Err(Error::Configuration(
+                    "Disconnect this Mac before removing it".into(),
+                ));
+            }
             (AuditedVault {
                 scope: &state.audit,
             })
@@ -1772,10 +1863,8 @@ pub fn run(
         })();
         match result {
             Ok(()) => {
-                if let Err(error) = select(&app, &delete_state, None) {
+                if let Err(error) = select(&app, &delete_state, None, false) {
                     notify(&app, error);
-                } else {
-                    app.set_editor_open(false);
                 }
             }
             Err(error) => notify(&app, error),
@@ -1804,7 +1893,7 @@ pub fn run(
     app.on_refresh_desktop(move || {
         if let Some(app) = weak.upgrade() {
             let state = refresh_state.borrow();
-            if let Some(size) = state.source_size
+            if let Some(size) = state.active.source_size
                 && let Err(error) = state.send(Command::Refresh {
                     size,
                     incremental: false,
@@ -1837,7 +1926,7 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = pointer_state.borrow_mut();
-            let Some(viewport) = state.viewport else {
+            let Some(viewport) = state.active.viewport else {
                 return Ok(());
             };
             if event.kind == PointerEventKind::Cancel {
@@ -1881,7 +1970,7 @@ pub fn run(
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = wheel_state.borrow_mut();
-            let Some(viewport) = state.viewport else {
+            let Some(viewport) = state.active.viewport else {
                 return Ok(());
             };
             let Some((x, y)) = viewport.to_remote(x, y, false) else {
@@ -1889,7 +1978,12 @@ pub fn run(
             };
             state.flush_pointer()?;
             state.pointer = (x, y);
-            let scale = if state.session.as_ref().is_some_and(Session::uses_hevc) {
+            let scale = if state
+                .active
+                .session
+                .as_ref()
+                .is_some_and(Session::uses_hevc)
+            {
                 state.scroll_scale.for_macos()
             } else {
                 state.scroll_scale
@@ -1912,6 +2006,26 @@ pub fn run(
         }
         let result = (|| -> Result<()> {
             let mut state = key_state.borrow_mut();
+            let key = keysym(event.text.as_str()).map(|symbol| {
+                let identifier = if symbol <= 255 {
+                    char::from_u32(symbol)
+                        .unwrap_or('\0')
+                        .to_ascii_lowercase()
+                        .to_string()
+                } else {
+                    event.text.to_string()
+                };
+                (identifier, symbol)
+            });
+            // A key held through a desktop switch can still auto-repeat locally.
+            if down
+                && event.repeat
+                && !key
+                    .as_ref()
+                    .is_some_and(|(id, _)| state.keys.contains_key(id))
+            {
+                return Ok(());
+            }
             state.flush_pointer()?;
             if down
                 && app.get_clipboard_shared()
@@ -1931,7 +2045,7 @@ pub fn run(
                 .into_iter()
                 .enumerate()
             {
-                if state.modifiers[index] != modifiers[index] {
+                if state.modifiers[index] != modifiers[index] && (down || !modifiers[index]) {
                     state.send(Command::Key {
                         keysym,
                         down: modifiers[index],
@@ -1939,15 +2053,7 @@ pub fn run(
                     state.modifiers[index] = modifiers[index];
                 }
             }
-            if let Some(symbol) = keysym(event.text.as_str()) {
-                let identifier = if symbol <= 255 {
-                    char::from_u32(symbol)
-                        .unwrap_or('\0')
-                        .to_ascii_lowercase()
-                        .to_string()
-                } else {
-                    event.text.to_string()
-                };
+            if let Some((identifier, symbol)) = key {
                 if down {
                     state.keys.insert(identifier, symbol);
                     state.send(Command::Key {
@@ -1987,7 +2093,7 @@ pub fn run(
             let mut state = audio_state.borrow_mut();
             state.settings.audio = settings;
             state.audio_persist_at = Some(Instant::now() + Duration::from_millis(300));
-            if let Some(session) = &state.session
+            if let Some(session) = &state.active.session
                 && session.uses_hevc()
             {
                 session.send(Command::Audio(settings))?;
@@ -2027,9 +2133,17 @@ pub fn run(
                         eprintln!("MacCanvas audio installer window closed");
                     }
                 })?;
-            state.audio_install = Some(receiver);
+            state.audio_install = Some(AudioInstall {
+                generation: state
+                    .active
+                    .session
+                    .as_ref()
+                    .map(|_| state.active.generation),
+                result: receiver,
+            });
+            state.active.audio_status = "Downloading and verifying the audio codec...".into();
             app.set_audio_installing(true);
-            app.set_audio_status("Downloading and verifying the audio codec...".into());
+            app.set_audio_status(state.active.audio_status.as_str().into());
             Ok(())
         })();
         if let Err(error) = result {
@@ -2046,7 +2160,7 @@ pub fn run(
                     "Connect with HEVC before retrying audio".into(),
                 ));
             }
-            let settings = retry_audio_state.borrow().settings.streaming;
+            let settings = retry_audio_state.borrow().active.streaming;
             apply_streaming(&app, &retry_audio_state, settings, true)
         })();
         if let Err(error) = result {
@@ -2070,136 +2184,43 @@ pub fn run(
                 notify(&app, error);
             }
             for (generation, event) in receiver.try_iter() {
-                if generation != timer_state.borrow().generation {
-                    continue;
-                }
-                match event {
-                    Event::Connected {
-                        profile,
-                        server_name,
-                        credentials_saved,
-                    } => {
-                        let saved = {
-                            let mut state = timer_state.borrow_mut();
-                            if credentials_saved {
-                                state.connection_credentials = Some(CredentialSource::Saved);
-                            }
-                            state.reconnect_attempt = 0;
-                            state.connection_profile = Some(profile.clone());
-                            if let Some(index) = state
-                                .settings
-                                .profiles
-                                .iter()
-                                .position(|old| old.id == profile.id)
-                            {
-                                state.settings.profiles[index] = profile.clone();
-                                state.selected = Some(index);
-                            } else {
-                                state.settings.profiles.push(profile.clone());
-                                state.selected = Some(state.settings.profiles.len() - 1);
-                            }
-                            state.persist()
-                        };
-                        app.set_connecting(false);
-                        app.set_connected(true);
-                        let hevc = timer_state.borrow().session.as_ref().is_some_and(Session::uses_hevc);
-                        app.set_hevc_active(hevc);
-                        app.set_clipboard_shared(!hevc && timer_state.borrow().settings.clipboard_enabled);
-                        app.set_status(
-                            format!("Connected to {} ({server_name})", profile.name).into(),
-                        );
-                        app.set_has_saved(profile.has_saved_credentials);
-                        app.set_use_saved(profile.has_saved_credentials);
-                        model(&app, &timer_state.borrow());
-                        if let Err(error) = saved {
-                            notify(&app, error);
-                        }
-                        app.set_editor_open(false);
-                        app.invoke_focus_canvas();
-                        let restart_audio = {
-                            let mut state = timer_state.borrow_mut();
-                            std::mem::take(&mut state.audio_restart)
-                        };
-                        if restart_audio && hevc {
-                            let settings = timer_state.borrow().settings.streaming;
-                            if let Err(error) = apply_streaming(&app, &timer_state, settings, true) {
-                                notify(&app, error);
-                            }
-                        }
-                    }
-                    Event::Warning(message) => notify(&app, message),
-                    Event::Cursor { update, point_scale } => {
-                        app.set_remote_cursor_scale(point_scale);
-                        match update {
-                            maccanvas::apple_hps::cursor::Update::Image(cursor) => {
-                                let mut pixels = SharedPixelBuffer::<Rgba8Pixel>::new(
-                                    u32::from(cursor.width), u32::from(cursor.height),
-                                );
-                                pixels.make_mut_bytes().copy_from_slice(&cursor.rgba);
-                                app.set_remote_cursor_image(slint::Image::from_rgba8(pixels));
-                                app.set_remote_cursor_width(f32::from(cursor.width));
-                                app.set_remote_cursor_height(f32::from(cursor.height));
-                                app.set_remote_cursor_hotspot_x(f32::from(cursor.hotspot_x));
-                                app.set_remote_cursor_hotspot_y(f32::from(cursor.hotspot_y));
-                                app.set_remote_cursor_hidden(false);
-                                app.set_remote_cursor_ready(true);
-                            }
-                            maccanvas::apple_hps::cursor::Update::Hidden => {
-                                app.set_remote_cursor_ready(false);
-                                app.set_remote_cursor_hidden(true);
-                            }
-                        }
-                    }
-                    Event::Audio(status) => {
-                        let missing = matches!(status, maccanvas::audio::Status::CodecMissing(_));
-                        app.set_audio_codec_missing(missing);
-                        let description = match status {
-                            maccanvas::audio::Status::Waiting => "Waiting for Mac audio...".to_owned(),
-                            maccanvas::audio::Status::CodecMissing(message) => message,
-                            maccanvas::audio::Status::Playing => "Mac system audio - 48 kHz stereo".to_owned(),
-                            maccanvas::audio::Status::Unavailable(message) => {
-                                notify(&app, &message);
-                                message
-                            }
-                        };
-                        app.set_audio_status(description.into());
-                    }
-                    Event::Error(message) => notify(&app, message),
-                    Event::Disconnected { reconnect } => {
-                        if let Err(error) = connection_ended(&app, &timer_state, reconnect) {
-                            notify(&app, error);
-                        }
-                    }
+                if let Err(error) = desktop_events::route(&app, &timer_state, generation, event) {
+                    notify(&app, error);
                 }
             }
             let result = (|| -> Result<()> {
                 {
                     let mut state = timer_state.borrow_mut();
+                    while let Some(i) = state.retired_files.iter().position(files_ui::Files::finished) { state.retired_files.remove(i).finish()?; }
                     while let Some(index) = state.retired.iter().position(Session::is_finished) {
                         if let Err(error) = state.retired.remove(index).finish() {
-                            state.reconnect = None;
-                            state.reconnect_attempt = 0;
-                            app.set_connecting(false);
-                            return Err(error);
+                            notify(&app, error);
                         }
                     }
                     if let Some(error) = state.audit.audit().failure()
                         && !state.audit_reported
                     {
                         state.audit_reported = true;
-                        let closed = state.session.as_ref().map(Session::close).transpose();
-                        state.reconnect = None;
-                        state.reconnect_attempt = 0;
-                        state.connection_credentials = None;
+                        for desk in &mut state.background {
+                            if let Some(session) = &desk.session { let _ = session.close(); }
+                            desk.reconnect = None;
+                            desk.connection_credentials = None;
+                            desk.files.retire();
+                        }
+                        let closed = state.active.session.as_ref().map(Session::close).transpose();
+                        state.active.reconnect = None;
+                        state.active.reconnect_attempt = 0;
+                        state.active.connection_credentials = None;
                         app.set_connecting(false);
-                        state.files.stop(&app);
+                        state.active.files.stop(&app);
                         let mut message = format!("Security logging failed. Connections are disabled until MacCanvas is restarted. {error}");
                         if let Err(error) = closed { message.push_str(&format!(" Socket cleanup also reported: {error}")); }
                         app.set_audit_error(message.clone().into());
                         notify(&app, Error::Audit(message));
                     }
                 }
-                tick_reconnect(&app, &timer_state, &events)?;
+                desktop_events::tick_reconnect(&app, &timer_state, &events)?;
+                desktops::previews(&app, &timer_state)?;
                 tick_clipboard(&app, &mut timer_state.borrow_mut())?;
                 files_ui::tick(&app,&mut timer_state.borrow_mut())?;
                 tick_video(&app, &timer_state)?;
@@ -2222,7 +2243,7 @@ pub fn run(
                     app.set_pulse(!app.get_pulse());
                 }
                 if let Some(counters) = state
-                    .session
+                    .active.session
                     .as_ref()
                     .map(|session| session.counters.clone())
                 {
@@ -2237,26 +2258,26 @@ pub fn run(
                             encoding_name(counters.encoding.load(Ordering::Relaxed)).into()
                         },
                     );
-                    let (ssh_received,ssh_sent) = state.files.network();
+                    let (ssh_received,ssh_sent) = state.active.files.network();
                     let combined = telemetry::Counters::default();
                     combined.received.store(counters.received.load(Ordering::Relaxed).saturating_add(ssh_received),Ordering::Relaxed);
                     combined.sent.store(counters.sent.load(Ordering::Relaxed).saturating_add(ssh_sent),Ordering::Relaxed);
-                    if let Some(sample) = state.monitor.sample(&combined, now) {
+                    if let Some(sample) = state.active.monitor.sample(&combined, now) {
                         app.set_download_rate(telemetry::rate(sample.download_bps).into());
                         app.set_upload_rate(telemetry::rate(sample.upload_bps).into());
                         app.set_fps_text(format!("{:.0} FPS", sample.fps).into());
                         let bars = state
-                            .monitor
+                            .active.monitor
                             .bars()
                             .into_iter()
                             .map(|(download, upload)| TrafficBar { download, upload })
                             .collect::<Vec<_>>();
                         app.set_traffic(ModelRc::from(Rc::new(VecModel::from(bars))));
-                        if now.saturating_duration_since(state.network_logged) >= Duration::from_secs(60) {
-                            if state.session.is_some() {
+                        if now.saturating_duration_since(state.active.network_logged) >= Duration::from_secs(60) {
+                            if state.active.session.is_some() {
                                 state.audit.event("application.network.summary", Level::Info, json!({
                                     "network.protocol.name":"rfb+ssh",
-                                    "vnc.session.generation":state.generation,
+                                    "vnc.session.generation":state.active.generation,
                                     "network.io.received":combined.received.load(Ordering::Relaxed),
                                     "network.io.sent":combined.sent.load(Ordering::Relaxed),
                                     "network.receive.bits_per_second":sample.download_bps,
@@ -2264,7 +2285,7 @@ pub fn run(
                                     "rfb.displayed.fps":sample.fps, "rfb.encoding":counters.encoding.load(Ordering::Relaxed),
                                 }))?;
                             }
-                            state.network_logged = now;
+                            state.active.network_logged = now;
                         }
                     }
                 }
@@ -2281,11 +2302,26 @@ pub fn run(
     if save_audio {
         state.borrow().persist()?;
     }
-    state.borrow_mut().files.stop(&app);
-    if let Some(session) = state.borrow_mut().session.take() {
+    state.borrow_mut().active.files.stop(&app);
+    if let Some(session) = state.borrow_mut().active.session.take() {
         session.finish()?;
     }
-    state.borrow_mut().files.finish(&app)?;
+    state.borrow_mut().active.files.finish()?;
+    let background = std::mem::take(&mut state.borrow_mut().background);
+    for desk in &background {
+        if let Some(session) = &desk.session {
+            session.close()?;
+        }
+    }
+    for mut desk in background {
+        if let Some(session) = desk.session.take() {
+            session.finish()?;
+        }
+        desk.files.finish()?;
+    }
+    for mut files in std::mem::take(&mut state.borrow_mut().retired_files) {
+        files.finish()?;
+    }
     for session in std::mem::take(&mut state.borrow_mut().retired) {
         session.finish()?;
     }

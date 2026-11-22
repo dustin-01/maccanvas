@@ -97,19 +97,21 @@ struct Buffer {
     len: usize,
     received: bool,
     settings: Settings,
+    foreground: Arc<AtomicBool>,
     gain: f32,
     dropped: u64,
     underrun: u64,
 }
 
 impl Buffer {
-    fn new(settings: Settings) -> Self {
+    fn new(settings: Settings, foreground: Arc<AtomicBool>) -> Self {
         Self {
             samples: Zeroizing::new(vec![0.0; CAPACITY]),
             read: 0,
             len: 0,
             received: false,
             settings,
+            foreground,
             gain: 0.0,
             dropped: 0,
             underrun: 0,
@@ -122,6 +124,13 @@ impl Buffer {
             || !pcm.samples.len().is_multiple_of(CHANNELS)
         {
             return Err(failed("The decoder returned an invalid stereo PCM block"));
+        }
+        if !self.foreground.load(Ordering::Acquire) {
+            if self.len != 0 {
+                self.clear();
+            }
+            self.gain = 0.0;
+            return Ok(());
         }
         for frame in pcm.samples.chunks_exact(CHANNELS) {
             if self.len + CHANNELS > CAPACITY {
@@ -154,6 +163,7 @@ impl Buffer {
         }
         let mut bytes = Zeroizing::new(vec![0u8; frames * CHANNELS * 4]);
         let mut source_frames = 0;
+        let muted = self.settings.muted || !self.foreground.load(Ordering::Acquire);
         for frame in bytes.chunks_exact_mut(CHANNELS * 4) {
             let available = self.len >= CHANNELS;
             if available {
@@ -162,7 +172,7 @@ impl Buffer {
                 self.underrun = self.underrun.saturating_add(1);
             }
             let target = f32::from(self.settings.volume) / 100.0;
-            if self.settings.muted {
+            if muted {
                 self.gain = 0.0;
             } else {
                 self.gain += (target - self.gain).clamp(-1.0 / 480.0, 1.0 / 480.0);
@@ -234,10 +244,15 @@ pub(crate) struct Statistics {
 }
 
 impl Playback {
-    pub fn start(settings: Settings, scope: Scope, status: Sender<Status>) -> Result<Self> {
+    pub fn start(
+        settings: Settings,
+        foreground: Arc<AtomicBool>,
+        scope: Scope,
+        status: Sender<Status>,
+    ) -> Result<Self> {
         settings.validate()?;
         let shared = Arc::new(Shared {
-            buffer: Mutex::new(Buffer::new(settings)),
+            buffer: Mutex::new(Buffer::new(settings, foreground)),
             changed: Condvar::new(),
             stopping: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
@@ -362,7 +377,7 @@ mod tests {
 
     #[test]
     fn volume_and_mute_are_local_and_do_not_replay_stale_pcm() {
-        let mut buffer = Buffer::new(Settings::default());
+        let mut buffer = Buffer::new(Settings::default(), Arc::new(AtomicBool::new(true)));
         buffer.push(&pcm(960, 16384)).unwrap();
         let block = buffer.render(960).unwrap();
         let last = f32::from_le_bytes(block.bytes[block.bytes.len() - 4..].try_into().unwrap());
@@ -385,7 +400,7 @@ mod tests {
 
     #[test]
     fn audio_backlog_is_bounded_and_consumed_samples_are_cleared() {
-        let mut buffer = Buffer::new(Settings::default());
+        let mut buffer = Buffer::new(Settings::default(), Arc::new(AtomicBool::new(true)));
         for _ in 0..4 {
             buffer.push(&pcm(2048, 1000)).unwrap();
         }
@@ -423,6 +438,40 @@ mod tests {
     }
 
     #[test]
+    fn background_audio_is_discarded_and_focus_preserves_session_volume_and_mute() {
+        let foreground = Arc::new(AtomicBool::new(true));
+        let settings = Settings {
+            volume: 25,
+            muted: false,
+        };
+        let mut buffer = Buffer::new(settings, foreground.clone());
+        buffer.push(&pcm(960, 16_384)).unwrap();
+        foreground.store(false, Ordering::Release);
+        let silent = buffer.render(480).unwrap();
+        assert!(silent.bytes.iter().all(|byte| *byte == 0));
+        buffer.push(&pcm(960, 16_384)).unwrap();
+        assert_eq!(buffer.len, 0);
+        foreground.store(true, Ordering::Release);
+        assert_eq!(buffer.settings, settings);
+        buffer.push(&pcm(960, 16_384)).unwrap();
+        let audible = buffer.render(960).unwrap();
+        let last = f32::from_le_bytes(audible.bytes[audible.bytes.len() - 4..].try_into().unwrap());
+        assert!((last - 0.125).abs() < 0.00001);
+        buffer.settings.muted = true;
+        foreground.store(false, Ordering::Release);
+        foreground.store(true, Ordering::Release);
+        buffer.push(&pcm(480, 16_384)).unwrap();
+        assert!(
+            buffer
+                .render(480)
+                .unwrap()
+                .bytes
+                .iter()
+                .all(|byte| *byte == 0)
+        );
+    }
+
+    #[test]
     #[ignore = "Plays only an original very quiet test tone on the user's default output; never captures audio"]
     fn quiet_synthetic_audio_reaches_the_real_windows_output() {
         let directory = tempfile::tempdir().unwrap();
@@ -430,6 +479,7 @@ mod tests {
         let (sender, receiver) = std::sync::mpsc::channel();
         let mut output = Playback::start(
             Settings::default(),
+            Arc::new(AtomicBool::new(true)),
             guard.audit().scope(json!({"test.fixture":"quiet_output"})),
             sender,
         )

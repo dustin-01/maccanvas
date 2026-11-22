@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    net::{SocketAddr, UdpSocket},
     path::Path,
     sync::{
         Arc,
@@ -22,6 +21,7 @@ use crate::{
 };
 
 use super::crypto::{Packet, Srtp};
+use super::udp::PeerSocket;
 
 struct Jitter {
     pending: BTreeMap<u64, Packet>,
@@ -118,10 +118,10 @@ pub(super) struct Service {
 
 impl Service {
     pub fn start(
-        socket: &UdpSocket,
-        peer: SocketAddr,
+        socket: Arc<PeerSocket>,
         key: &[u8; 46],
         settings: Settings,
+        foreground: Arc<AtomicBool>,
         counters: Arc<Counters>,
         scope: Scope,
         converter: &Path,
@@ -129,9 +129,8 @@ impl Service {
         let (status, statuses) = mpsc::channel();
         let decoder = Decoder::start(converter, scope.clone())?;
         let control = decoder.control();
-        let output = sound::Playback::start(settings, scope.clone(), status.clone())?;
+        let output = sound::Playback::start(settings, foreground, scope.clone(), status.clone())?;
         let publisher = output.publisher();
-        let socket = socket.try_clone()?;
         let receiver = Srtp::audio(key);
         let stop = Arc::new(AtomicBool::new(false));
         let source_failed = Arc::new(AtomicBool::new(false));
@@ -146,7 +145,6 @@ impl Service {
             .spawn(move || {
                 if let Err(error) = source(
                     socket,
-                    peer,
                     receiver,
                     decoder,
                     publisher,
@@ -316,8 +314,7 @@ struct SourceContext<'a> {
 }
 
 fn source(
-    socket: UdpSocket,
-    peer: SocketAddr,
+    socket: Arc<PeerSocket>,
     mut receiver: Srtp,
     mut decoder: Decoder,
     publisher: Publisher,
@@ -336,8 +333,8 @@ fn source(
     let mut last_rejection = Instant::now() - Duration::from_secs(1);
     while !stop.load(Ordering::Acquire) {
         for _ in 0..128 {
-            match socket.recv_from(&mut buffer) {
-                Ok((length, sender)) if sender == peer => {
+            match socket.recv(&mut buffer) {
+                Ok(length) => {
                     counters
                         .received
                         .fetch_add(length as u64, Ordering::Relaxed);
@@ -390,7 +387,6 @@ fn source(
                         }
                     }
                 }
-                Ok(_) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                 Err(error) => return Err(error.into()),

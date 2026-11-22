@@ -142,7 +142,9 @@ def read(connection, length):
 
 
 class Fixture:
-    def __init__(self):
+    def __init__(self, size=(3840, 2160), solid_bgra=None):
+        self.size = size
+        self.solid_bgra = solid_bgra
         self.listener = socket.socket()
         self.listener.bind(("127.0.0.1", 0))
         self.listener.listen(1)
@@ -153,6 +155,8 @@ class Fixture:
         self.pause_updates = threading.Event()
         self.shrink_desktop = threading.Event()
         self.expect_restart = threading.Event()
+        self.expect_disconnect = threading.Event()
+        self.disconnected = threading.Event()
         self.restart_started = threading.Event()
         self.restart_continue = threading.Event()
         self.pointers = []
@@ -160,6 +164,14 @@ class Fixture:
         self.offers = []
         self.updates = 0
         self.error = None
+
+    def frame_pixels(self, size):
+        width, height = size
+        if self.solid_bgra is not None:
+            return self.solid_bgra * (width * height)
+        half_width, half_height = width // 2, height // 2
+        return ((b"\0\0\xff\0" * half_width + b"\0\xff\0\0" * half_width) * half_height
+                + (b"\xff\0\0\0" * half_width + b"\xff\xff\xff\0" * half_width) * half_height)
 
     def run(self):
         try:
@@ -183,10 +195,11 @@ class Fixture:
                 self.authenticated.set()
                 connection.sendall(b"\0\0\0\0")
                 read(connection, 1)
-                size = (3840, 2160)
+                size = self.size
                 connection.sendall(struct.pack("!HH", *size) + FORMAT
                                    + struct.pack("!I", 7) + b"Fixture")
                 sent = False
+                sent_color = None
                 while not self.stop.is_set():
                     if not select.select([connection], [], [], 0.05)[0]:
                         continue
@@ -203,12 +216,11 @@ class Fixture:
                             assert -223 in self.offers[-1]
                             connection.sendall(b"\0\0\0\x01" + struct.pack("!HHHHi", 0, 0, *size, -223))
                             sent = False
-                        elif not sent:
-                            half_width, half_height = size[0] // 2, size[1] // 2
+                        elif not sent or self.solid_bgra != sent_color:
+                            sent_color = self.solid_bgra
                             connection.sendall(
                                 b"\0\0\0\x01" + struct.pack("!HHHHi", 0, 0, *size, 0)
-                                + ((b"\0\0\xff\0" * half_width + b"\0\xff\0\0" * half_width) * half_height)
-                                + ((b"\xff\0\0\0" * half_width + b"\xff\xff\xff\0" * half_width) * half_height)
+                                + self.frame_pixels(size)
                             )
                             sent = True
                         elif size == SMALL_DESKTOP:
@@ -234,9 +246,10 @@ class Fixture:
                     else:
                         raise AssertionError(f"Unrequested client message: {kind}")
         except (EOFError, ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            self.disconnected.set()
             if self.expect_restart.is_set():
                 self.restart_probe()
-            elif not self.stop.is_set():
+            elif not self.stop.is_set() and not self.expect_disconnect.is_set():
                 self.error = AssertionError("Viewer closed the fixture unexpectedly")
         except Exception as error:
             self.error = error
@@ -285,7 +298,7 @@ def automate(pid, port, action, extra=()):
         "powershell.exe", "-NoProfile", "-File", str(ROOT / "scripts" / "Gui-Fixture.ps1"),
         "-ProcessId", str(pid), "-Port", str(port), "-Action", action, *extra
     ], text=True, timeout=60 if action == "ssh-dialogs" else 30)
-    return json.loads(output) if action in ("bounds", "telemetry") else None
+    return json.loads(output) if action in ("bounds", "preview-bounds", "telemetry") else None
 
 
 def send_input(event):

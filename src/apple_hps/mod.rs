@@ -8,17 +8,20 @@ mod offers;
 mod rtp;
 #[cfg(test)]
 mod tests;
+mod udp;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    net::{SocketAddr, TcpStream, UdpSocket},
+    net::TcpStream,
     path::PathBuf,
-    sync::{Arc, atomic::Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
 use serde_json::json;
-use socket2::SockRef;
 use zeroize::Zeroizing;
 
 use crate::{
@@ -38,6 +41,7 @@ use control::{Channel, Notice};
 use crypto::{Packet, Srtcp, Srtp, SrtpSender};
 use offers::Offers;
 use rtp::Assembler;
+use udp::PeerSocket;
 
 pub const COUNTER_ENCODING: i32 = -26_500;
 
@@ -59,25 +63,8 @@ fn failed(message: impl std::fmt::Display) -> Error {
     Error::Protocol(format!("HEVC screen sharing: {message}"))
 }
 
-fn bind_udp(address: SocketAddr) -> Result<UdpSocket> {
-    let socket = UdpSocket::bind(address).map_err(|error| {
-        failed(format!(
-            "cannot bind UDP port {}: {error}. Close other HEVC viewers using this port.",
-            address.port()
-        ))
-    })?;
-    SockRef::from(&socket).set_recv_buffer_size(4 * 1024 * 1024)?;
-    socket.set_nonblocking(true)?;
-    Ok(socket)
-}
-
-fn send_udp(
-    socket: &UdpSocket,
-    peer: SocketAddr,
-    packet: &[u8],
-    counters: &Counters,
-) -> Result<()> {
-    let count = socket.send_to(packet, peer)?;
+fn send_udp(socket: &PeerSocket, packet: &[u8], counters: &Counters) -> Result<()> {
+    let count = socket.send(packet)?;
     if count != packet.len() {
         return Err(failed("UDP feedback was only partially sent"));
     }
@@ -142,12 +129,11 @@ pub struct Client {
     audio: Option<audio::Service>,
     audio_pending: VecDeque<AudioStatus>,
     audio_settings: AudioSettings,
+    foreground: Arc<AtomicBool>,
     converter: Option<PathBuf>,
     channel: Channel,
-    control_socket: UdpSocket,
-    video_socket: UdpSocket,
-    control_peer: SocketAddr,
-    video_peer: SocketAddr,
+    control_socket: Arc<PeerSocket>,
+    video_socket: Arc<PeerSocket>,
     offers: Offers,
     configuration: Zeroizing<Vec<u8>>,
     receiver: Srtp,
@@ -193,12 +179,32 @@ pub struct Client {
 
 impl Client {
     pub fn open(
+        stream: Metered<TcpStream>,
+        credentials: &Credentials,
+        settings: StreamSettings,
+        scope: Scope,
+        audio_settings: AudioSettings,
+        prefer_hardware: bool,
+    ) -> Result<Self> {
+        Self::open_with_foreground(
+            stream,
+            credentials,
+            settings,
+            scope,
+            audio_settings,
+            prefer_hardware,
+            Arc::new(AtomicBool::new(true)),
+        )
+    }
+
+    pub(crate) fn open_with_foreground(
         mut stream: Metered<TcpStream>,
         credentials: &Credentials,
         settings: StreamSettings,
         scope: Scope,
         audio_settings: AudioSettings,
         prefer_hardware: bool,
+        foreground: Arc<AtomicBool>,
     ) -> Result<Self> {
         settings.validate()?;
         if !settings.encoding.is_hevc() {
@@ -211,10 +217,10 @@ impl Client {
             .port()
             .checked_add(1)
             .ok_or_else(|| failed("HEVC requires a control port below 65535"))?;
-        let control_peer = peer;
-        let video_peer = SocketAddr::new(peer.ip(), video_port);
-        let control_socket = bind_udp(SocketAddr::new(local.ip(), peer.port()))?;
-        let video_socket = bind_udp(SocketAddr::new(local.ip(), video_port))?;
+        let mut video_peer = peer;
+        video_peer.set_port(video_port);
+        let control_socket = PeerSocket::bind(local, peer)?;
+        let video_socket = PeerSocket::bind(local, video_peer)?;
         let counters = stream.counters.clone();
         let key = control::authenticate(&mut stream, credentials)?;
         scope.critical("security.authentication.completed",Level::Info,json!({
@@ -258,13 +264,13 @@ impl Client {
         let mut last_punch = Instant::now() - Duration::from_secs(1);
         let (canvas, layout) = control::wait_canvas(&mut channel, &configuration, || {
             if last_punch.elapsed() >= Duration::from_millis(100) {
-                send_udp(&control_socket, control_peer, &[0], &counters)?;
-                send_udp(&video_socket, video_peer, &[0], &counters)?;
+                send_udp(&control_socket, &[0], &counters)?;
+                send_udp(&video_socket, &[0], &counters)?;
                 last_punch = Instant::now();
             }
             for _ in 0..256 {
-                match video_socket.recv_from(&mut buffer) {
-                    Ok((length, sender)) if sender == video_peer => {
+                match video_socket.recv(&mut buffer) {
+                    Ok(length) => {
                         counters
                             .received
                             .fetch_add(length as u64, Ordering::Relaxed);
@@ -274,7 +280,6 @@ impl Client {
                         early.push_back(buffer[..length].to_vec());
                         early_bytes += length;
                     }
-                    Ok(_) => (),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                     Err(error) => return Err(error.into()),
@@ -340,12 +345,11 @@ impl Client {
             audio: None,
             audio_pending,
             audio_settings,
+            foreground,
             converter,
             channel,
             control_socket,
             video_socket,
-            control_peer,
-            video_peer,
             offers,
             configuration,
             receiver,
@@ -398,10 +402,10 @@ impl Client {
             return Ok(());
         };
         match audio::Service::start(
-            &self.control_socket,
-            self.control_peer,
+            self.control_socket.clone(),
             &self.offers.audio_receive,
             self.audio_settings,
+            self.foreground.clone(),
             self.counters.clone(),
             self.scope.clone(),
             converter,
@@ -494,12 +498,7 @@ impl Client {
         let mut feedback = rtp::report(self.offers.video_ssrc, Some((ssrc, self.highest)));
         feedback.extend_from_slice(&rtp::fir(ssrc));
         let protected = self.feedback.protect(&feedback)?;
-        send_udp(
-            &self.control_socket,
-            self.control_peer,
-            &protected,
-            &self.counters,
-        )?;
+        send_udp(&self.control_socket, &protected, &self.counters)?;
         self.last_fir = Instant::now();
         Ok(())
     }
@@ -715,8 +714,8 @@ impl Client {
             if !units.is_empty() {
                 break;
             }
-            match self.video_socket.recv_from(&mut buffer) {
-                Ok((length, peer)) if peer == self.video_peer => {
+            match self.video_socket.recv(&mut buffer) {
+                Ok(length) => {
                     self.counters
                         .received
                         .fetch_add(length as u64, Ordering::Relaxed);
@@ -724,7 +723,6 @@ impl Client {
                         self.media(&buffer[..length], now)?;
                     }
                 }
-                Ok(_) => (),
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                 Err(error) => return Err(error.into()),
@@ -733,13 +731,12 @@ impl Client {
         }
         if self.audio.as_ref().is_none_or(|audio| !audio.receiving()) {
             for _ in 0..128 {
-                match self.control_socket.recv_from(&mut buffer) {
-                    Ok((length, peer)) if peer == self.control_peer => {
+                match self.control_socket.recv(&mut buffer) {
+                    Ok(length) => {
                         self.counters
                             .received
                             .fetch_add(length as u64, Ordering::Relaxed);
                     }
-                    Ok(_) => (),
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                     Err(error) => return Err(error.into()),
@@ -791,7 +788,7 @@ impl Client {
             self.request_keyframe()?;
         }
         if self.last_feedback.elapsed() >= Duration::from_secs(1) {
-            send_udp(&self.video_socket, self.video_peer, &[0], &self.counters)?;
+            send_udp(&self.video_socket, &[0], &self.counters)?;
             self.channel.send(&[3, 1, 0, 0, 0, 0, 0, 1, 0, 1])?;
             let mut report = rtp::sender_report(self.offers.video_ssrc)?;
             report.extend_from_slice(&rtp::report(
@@ -799,21 +796,11 @@ impl Client {
                 self.selected.map(|ssrc| (ssrc, self.highest)),
             ));
             let protected = self.feedback.protect(&report)?;
-            send_udp(
-                &self.control_socket,
-                self.control_peer,
-                &protected,
-                &self.counters,
-            )?;
+            send_udp(&self.control_socket, &protected, &self.counters)?;
             let heartbeat = self
                 .heartbeat
                 .heartbeat((self.started.elapsed().as_millis() as u32).wrapping_mul(90))?;
-            send_udp(
-                &self.control_socket,
-                self.control_peer,
-                &heartbeat,
-                &self.counters,
-            )?;
+            send_udp(&self.control_socket, &heartbeat, &self.counters)?;
             self.last_feedback = now;
         }
         let missing = self.assembler.missing(now);
@@ -823,12 +810,7 @@ impl Client {
                     rtp::report(self.offers.video_ssrc, Some((selected, self.highest)));
                 packet.extend_from_slice(&rtp::nack(self.offers.video_ssrc, selected, &missing));
                 let protected = self.feedback.protect(&packet)?;
-                send_udp(
-                    &self.control_socket,
-                    self.control_peer,
-                    &protected,
-                    &self.counters,
-                )?;
+                send_udp(&self.control_socket, &protected, &self.counters)?;
             }
             self.last_nack = now;
         }

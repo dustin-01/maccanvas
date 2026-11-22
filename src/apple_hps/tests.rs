@@ -164,23 +164,46 @@ fn media_answer() -> Vec<u8> {
 
 #[test]
 fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() {
-    encrypted_apple_peer(false, None);
+    let _peer_test = PEER_TEST.lock().unwrap();
+    encrypted_apple_peer(
+        TcpListener::bind(("127.0.0.2", 0)).unwrap(),
+        false,
+        None,
+        None,
+    );
 }
 
 #[test]
-fn unexpected_hevc_control_disconnect_requests_automatic_reconnect() {
-    encrypted_apple_peer(true, Some([2560, 1440]));
+fn two_hevc_macs_share_ports_and_an_unexpected_disconnect_requests_reconnect() {
+    let _peer_test = PEER_TEST.lock().unwrap();
+    let first = TcpListener::bind(("127.0.0.2", 0)).unwrap();
+    let second = TcpListener::bind(("127.0.0.3", first.local_addr().unwrap().port())).unwrap();
+    let (first_ready, wait_first) = mpsc::channel();
+    let (second_ready, wait_second) = mpsc::channel();
+    thread::scope(|scope| {
+        scope.spawn(|| encrypted_apple_peer(first, false, None, Some((first_ready, wait_second))));
+        encrypted_apple_peer(
+            second,
+            true,
+            Some([2560, 1440]),
+            Some((second_ready, wait_first)),
+        );
+    });
 }
 
-fn encrypted_apple_peer(drop_connection: bool, virtual_display: Option<[u16; 2]>) {
-    let _peer_test = PEER_TEST.lock().unwrap();
+fn encrypted_apple_peer(
+    listener: TcpListener,
+    drop_connection: bool,
+    virtual_display: Option<[u16; 2]>,
+    other_session: Option<(mpsc::Sender<()>, mpsc::Receiver<()>)>,
+) {
     let directory = tempfile::tempdir().unwrap();
     let mut audit = Audit::start(directory.path().join("audit")).unwrap();
-    let listener = TcpListener::bind(("127.0.0.2", 0)).unwrap();
-    let port = listener.local_addr().unwrap().port();
+    let address = listener.local_addr().unwrap();
+    let port = address.port();
     assert!(port < 65535);
-    let video_socket = UdpSocket::bind(("127.0.0.2", port + 1)).unwrap();
-    let control_socket = UdpSocket::bind(("127.0.0.2", port)).unwrap();
+    let video_socket = UdpSocket::bind((address.ip(), port + 1)).unwrap();
+    let control_socket = UdpSocket::bind(address).unwrap();
     let (observed, received) = mpsc::channel();
     let (shutdown, shutdown_requested) = mpsc::channel();
     let private = RsaPrivateKey::new(&mut rand::rngs::OsRng, 2048).unwrap();
@@ -412,7 +435,7 @@ fn encrypted_apple_peer(drop_connection: bool, virtual_display: Option<[u16; 2]>
             profile: Profile {
                 id: Uuid::new_v4(),
                 name: "HEVC test".into(),
-                host: "127.0.0.2".into(),
+                host: address.ip().to_string(),
                 port,
                 authentication: AuthMode::MacLogin,
                 has_saved_credentials: false,
@@ -482,6 +505,12 @@ fn encrypted_apple_peer(drop_connection: bool, virtual_display: Option<[u16; 2]>
         thread::sleep(Duration::from_millis(5));
     };
     assert_eq!((frame.size.width, frame.size.height), (64, 48));
+    if let Some((ready, other)) = other_session {
+        // Both Macs must deliver authenticated video on the same pair of ports
+        // before either session can proceed to its input and shutdown checks.
+        ready.send(()).unwrap();
+        other.recv_timeout(Duration::from_secs(15)).unwrap();
+    }
     assert_eq!(&frame.rgba[..4], &[0, 42, 0, 255]);
     assert_eq!(
         session
@@ -491,6 +520,24 @@ fn encrypted_apple_peer(drop_connection: bool, virtual_display: Option<[u16; 2]>
         super::COUNTER_ENCODING
     );
     assert!(session.share_clipboard(true).is_err());
+    let preview_notified = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    if virtual_display.is_some() {
+        session.set_foreground(false);
+        let published = frames.clone();
+        let notified = preview_notified.clone();
+        session
+            .set_frame_notifier(Arc::new(move || {
+                if published
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .is_some_and(|frame| frame.size.width == 3840)
+                {
+                    notified.store(true, std::sync::atomic::Ordering::Release);
+                }
+            }))
+            .unwrap();
+    }
     let live_settings = StreamSettings {
         encoding: Encoding::Hevc30,
         hevc_bitrate_bps: 125_500_000,
@@ -587,6 +634,10 @@ fn encrypted_apple_peer(drop_connection: bool, virtual_display: Option<[u16; 2]>
         }
     }
     session.finish().unwrap();
+    assert!(
+        !preview_notified.load(std::sync::atomic::Ordering::Acquire),
+        "A background preview must not wake the foreground renderer"
+    );
     shutdown.send(()).unwrap();
     if !drop_connection {
         assert!(

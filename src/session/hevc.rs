@@ -72,13 +72,14 @@ pub(super) fn run(
         inner: stream,
         counters,
     };
-    let mut client = apple_hps::Client::open(
+    let mut client = apple_hps::Client::open_with_foreground(
         stream,
         &credentials,
         request.streaming,
         request.audit.clone(),
         request.audio,
         request.window != 0,
+        control.foreground.clone(),
     )?;
     let mut profile = Some(request.profile);
     let mut credentials = Some(credentials);
@@ -191,13 +192,15 @@ pub(super) fn run(
                         Some(frame);
                 }
             }
-            let notifier = control
-                .frame_notifier
-                .lock()
-                .map_err(|_| Error::Display("Frame notification is unavailable".into()))?
-                .clone();
-            if let Some(notifier) = notifier {
-                notifier();
+            if control.foreground.load(Ordering::Acquire) {
+                let notifier = control
+                    .frame_notifier
+                    .lock()
+                    .map_err(|_| Error::Display("Frame notification is unavailable".into()))?
+                    .clone();
+                if let Some(notifier) = notifier {
+                    notifier();
+                }
             }
         }
         thread::sleep(Duration::from_millis(2));

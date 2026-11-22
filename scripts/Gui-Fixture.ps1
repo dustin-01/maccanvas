@@ -6,7 +6,8 @@ param(
     [string]$SshFingerprint,
     [ValidateSet('auto', 'hevc30', 'hevc60')][string]$StreamMode = 'auto',
     [string]$MacDisplay,
-    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
+    [string]$MachineName = 'Fixture Mac',
+    [ValidateSet('connect', 'connect-another', 'cancel-pending-card', 'check-card-actions', 'select-switcher', 'preview-bounds', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 trap {
@@ -36,6 +37,45 @@ function Assert-FixtureElementAbsent([string]$Name) {
     $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, $Name)
     if ($null -ne $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)) {
         throw "Unexpected control in this panel: $Name"
+    }
+}
+function Connect-FixtureMac {
+    foreach ($entry in @(
+        @('Machine name', $MachineName),
+        @('Mac address', '127.0.0.1'),
+        @('VNC port', "$Port"),
+        @('Mac username', 'fixture-user'),
+        @('Mac password', 'fixture-password')
+    )) {
+        $edit = Find-FixtureElement $entry[0] ([Windows.Automation.ControlType]::Edit)
+        $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($entry[1])
+    }
+    $button = Find-FixtureElement 'Connect to Mac' ([Windows.Automation.ControlType]::Button)
+    $deadline = [DateTime]::UtcNow.AddSeconds(5)
+    while (-not $button.Current.IsEnabled -and [DateTime]::UtcNow -lt $deadline) {
+        Start-Sleep -Milliseconds 50
+        $button = Find-FixtureElement 'Connect to Mac' ([Windows.Automation.ControlType]::Button)
+    }
+    if (-not $button.Current.IsEnabled) { throw 'Connection form did not become ready after entering fixture credentials.' }
+    $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+}
+function Scroll-FixtureQualityDown {
+    # Slint exposes only controls in the visible part of the scrollable settings panel.
+    if (-not ('Fixture.QualityScroll' -as [type])) {
+        Add-Type -Namespace Fixture -Name QualityScroll -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool SetPhysicalCursorPos(int x, int y);
+[DllImport("user32.dll")] public static extern bool PostMessageW(IntPtr window, uint message, IntPtr parameter, IntPtr position);
+'@
+    }
+    $bounds = $window.Current.BoundingRectangle
+    $x = [int]($bounds.X + $bounds.Width / 2)
+    $y = [int]($bounds.Y + $bounds.Height / 2)
+    if (-not [Fixture.QualityScroll]::SetPhysicalCursorPos($x, $y)) { throw 'Could not position the test pointer.' }
+    $position = [IntPtr](($y -shl 16) -bor ($x -band 65535))
+    for ($i = 0; $i -lt 8; $i++) {
+        if (-not [Fixture.QualityScroll]::PostMessageW($viewerHandle, 0x20A, [IntPtr](-120 -shl 16), $position)) {
+            throw 'Could not scroll the viewer settings.'
+        }
     }
 }
 function Set-FixtureStreamMode([string]$Mode) {
@@ -102,6 +142,7 @@ switch ($Action) {
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         Set-FixtureStreamMode $StreamMode
         if ($MacDisplay) {
+            Scroll-FixtureQualityDown
             $display = (Find-FixtureElement 'Mac display' ([Windows.Automation.ControlType]::ComboBox)).
                 GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
             $display.SetValue($MacDisplay)
@@ -354,6 +395,8 @@ public static class MacCanvasOwnedDialogInput {
     'toggle-fit-view' {
         (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $null = Find-FixtureElement 'Picture & connection' ([Windows.Automation.ControlType]::Text)
+        Scroll-FixtureQualityDown
         (Find-FixtureElement 'Fit view' ([Windows.Automation.ControlType]::CheckBox)).
             GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
         (Find-FixtureElement 'Close' ([Windows.Automation.ControlType]::Button)).
@@ -411,25 +454,52 @@ public static class MacCanvasOwnedDialogInput {
         Set-FixtureStreamMode 'auto'
         (Find-FixtureElement 'Apply' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
-        foreach ($entry in @(
-            @('Machine name', 'Fixture Mac'),
-            @('Mac address', '127.0.0.1'),
-            @('VNC port', "$Port"),
-            @('Mac username', 'fixture-user'),
-            @('Mac password', 'fixture-password')
-        )) {
-            $edit = Find-FixtureElement $entry[0] ([Windows.Automation.ControlType]::Edit)
-            $pattern = $edit.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
-            $pattern.SetValue($entry[1])
+        Connect-FixtureMac
+    }
+    'connect-another' {
+        (Find-FixtureElement 'Add a Mac' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        Connect-FixtureMac
+    }
+    'check-card-actions' {
+        $connect = Find-FixtureElement 'Connect' ([Windows.Automation.ControlType]::Button)
+        $connected = Find-FixtureElement 'Connected' ([Windows.Automation.ControlType]::Button)
+        if (-not $connect.Current.IsEnabled -or $connected.Current.IsEnabled) {
+            throw 'The idle Mac must allow Connect, and the connected Mac must disable Connected.'
         }
-        $button = Find-FixtureElement 'Connect to Mac' ([Windows.Automation.ControlType]::Button)
-        $deadline = [DateTime]::UtcNow.AddSeconds(5)
-        while (-not $button.Current.IsEnabled -and [DateTime]::UtcNow -lt $deadline) {
-            Start-Sleep -Milliseconds 50
-            $button = Find-FixtureElement 'Connect to Mac' ([Windows.Automation.ControlType]::Button)
+        $bounds = $connect.Current.BoundingRectangle
+        $rowCenter = $bounds.Y + $bounds.Height / 2
+        $condition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Details')
+        $details = @($window.FindAll([Windows.Automation.TreeScope]::Descendants, $condition) | Where-Object {
+            $r = $_.Current.BoundingRectangle
+            $_.Current.ControlType -eq [Windows.Automation.ControlType]::Button -and $r.Top -le $rowCenter -and $r.Bottom -gt $rowCenter
+        })
+        if ($details.Count -ne 1 -or -not $details[0].Current.IsEnabled) {
+            throw 'The idle Mac must have an enabled Details button alongside Connect.'
         }
-        if (-not $button.Current.IsEnabled) { throw 'Connection form did not become ready after entering fixture credentials.' }
-        $button.GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $details[0].GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        $name = (Find-FixtureElement 'Machine name' ([Windows.Automation.ControlType]::Edit)).
+            GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
+        if ($name -cne $MachineName) { throw "Details opened the wrong Mac: $name" }
+        (Find-FixtureElement 'Show saved Macs' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'cancel-pending-card' {
+        (Find-FixtureElement 'Show saved Macs' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement "Select $MachineName" ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement 'Cancel connection to selected Mac' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
+    'select-switcher' {
+        $combo = Find-FixtureElement 'Switch Mac' ([Windows.Automation.ControlType]::ComboBox)
+        $combo.GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).SetValue($MachineName)
+    }
+    'preview-bounds' {
+        $preview = Find-FixtureElement "Preview of $MachineName" $null
+        $bounds = $preview.Current.BoundingRectangle
+        @{ x = $bounds.X; y = $bounds.Y; width = $bounds.Width; height = $bounds.Height } | ConvertTo-Json -Compress
     }
     'fullscreen' {
         $button = Find-FixtureElement 'Full screen' ([Windows.Automation.ControlType]::Button)

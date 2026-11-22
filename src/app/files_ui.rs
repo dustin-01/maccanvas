@@ -23,6 +23,78 @@ enum ClipboardAction {
     Send,
 }
 
+// The file worker can finish a transfer while its desktop is in the background.
+#[derive(Default)]
+pub(super) struct Panel {
+    host: slint::SharedString,
+    port: slint::SharedString,
+    has_saved: bool,
+    use_saved: bool,
+    connected: bool,
+    directory_ready: bool,
+    connecting: bool,
+    busy: bool,
+    key_pending: bool,
+    fingerprint: slint::SharedString,
+    key_algorithm: slint::SharedString,
+    key_command: slint::SharedString,
+    path: slint::SharedString,
+    upload_name: slint::SharedString,
+    status: slint::SharedString,
+    error: slint::SharedString,
+    progress_label: slint::SharedString,
+    progress: f32,
+}
+
+impl Panel {
+    pub(super) fn capture(app: &App) -> Self {
+        Self {
+            host: app.get_files_host(),
+            port: app.get_files_port(),
+            has_saved: app.get_files_has_saved(),
+            use_saved: app.get_files_use_saved(),
+            connected: app.get_files_connected(),
+            directory_ready: app.get_files_directory_ready(),
+            connecting: app.get_files_connecting(),
+            busy: app.get_files_busy(),
+            key_pending: app.get_files_key_pending(),
+            fingerprint: app.get_files_fingerprint(),
+            key_algorithm: app.get_files_key_algorithm(),
+            key_command: app.get_files_key_command(),
+            path: app.get_files_path(),
+            upload_name: app.get_files_upload_name(),
+            status: app.get_files_status(),
+            error: app.get_files_error(),
+            progress_label: app.get_files_progress_label(),
+            progress: app.get_files_progress(),
+        }
+    }
+
+    pub(super) fn show(&self, app: &App, files: &Files) {
+        app.set_files_username("".into());
+        app.set_files_password("".into());
+        app.set_files_host(self.host.clone());
+        app.set_files_port(self.port.clone());
+        app.set_files_has_saved(self.has_saved);
+        app.set_files_use_saved(self.use_saved);
+        app.set_files_connected(self.connected);
+        app.set_files_directory_ready(self.directory_ready);
+        app.set_files_connecting(self.connecting);
+        app.set_files_busy(self.busy);
+        app.set_files_key_pending(self.key_pending);
+        app.set_files_fingerprint(self.fingerprint.clone());
+        app.set_files_key_algorithm(self.key_algorithm.clone());
+        app.set_files_key_command(self.key_command.clone());
+        app.set_files_path(self.path.clone());
+        app.set_files_upload_name(self.upload_name.clone());
+        app.set_files_status(self.status.clone());
+        app.set_files_error(self.error.clone());
+        app.set_files_progress_label(self.progress_label.clone());
+        app.set_files_progress(self.progress);
+        rows(app, files);
+    }
+}
+
 #[derive(Default)]
 pub(super) struct Files {
     client: Option<Client>,
@@ -37,16 +109,28 @@ pub(super) struct Files {
     sent: u64,
     baseline: (u64, u64),
     pending_clipboard: Option<ClipboardAction>,
+    // The SSH worker accepts one UI operation at a time. Only a copy started
+    // since this desktop last gained focus may write its response to Windows.
+    apply_clipboard_read: bool,
 }
 
 impl Files {
-    pub fn stop(&mut self, app: &App) {
-        self.approval = None;
+    pub fn clear_pending_clipboard(&mut self) {
         self.pending_clipboard = None;
+        self.apply_clipboard_read = false;
+    }
+
+    pub fn retire(&mut self) {
+        self.approval = None;
+        self.clear_pending_clipboard();
         if let Some(client) = self.client.take() {
             client.close();
             self.retiring.push(client);
         }
+    }
+
+    pub fn stop(&mut self, app: &App) {
+        self.retire();
         app.set_files_connected(false);
         app.set_files_connecting(false);
         app.set_files_busy(false);
@@ -61,8 +145,12 @@ impl Files {
         rows(app, self);
     }
 
-    pub fn finish(&mut self, app: &App) -> Result<()> {
-        self.stop(app);
+    pub fn finished(&self) -> bool {
+        self.retiring.iter().all(Client::is_finished)
+    }
+
+    pub fn finish(&mut self) -> Result<()> {
+        self.retire();
         for client in std::mem::take(&mut self.retiring) {
             client.finish()?;
         }
@@ -170,8 +258,9 @@ fn prepare_ssh(app: &App, state: &mut State) -> Result<()> {
         return Err(Error::Transfer("Connect to your Mac's screen first".into()));
     }
     state.release()?;
-    if state.files.client.is_none() {
+    if state.active.files.client.is_none() {
         let profile = state
+            .active
             .connection_profile
             .clone()
             .ok_or_else(|| Error::Transfer("The active Mac is unavailable".into()))?;
@@ -184,12 +273,12 @@ fn prepare_ssh(app: &App, state: &mut State) -> Result<()> {
         app.set_files_port("22".into());
         app.set_files_error("".into());
         app.set_files_status("SSH is shared by file transfer and clipboard.".into());
-        state.files.profile = Some(profile);
+        state.active.files.profile = Some(profile);
     }
     Ok(())
 }
 
-fn clipboard_command(app: &App, state: &State, action: ClipboardAction) -> Result<()> {
+fn clipboard_command(app: &App, state: &mut State, action: ClipboardAction) -> Result<()> {
     let command = match action {
         ClipboardAction::Copy => Command::CopyClipboard,
         ClipboardAction::Send => {
@@ -203,7 +292,9 @@ fn clipboard_command(app: &App, state: &State, action: ClipboardAction) -> Resul
             }
         }
     };
-    state.files.command(app, command)
+    state.active.files.command(app, command)?;
+    state.active.files.apply_clipboard_read = matches!(action, ClipboardAction::Copy);
+    Ok(())
 }
 
 fn request_clipboard(app: &App, state: &mut State, action: ClipboardAction) -> Result<()> {
@@ -215,7 +306,7 @@ fn request_clipboard(app: &App, state: &mut State, action: ClipboardAction) -> R
         }
     } else {
         prepare_ssh(app, state)?;
-        state.files.pending_clipboard = Some(action);
+        state.active.files.pending_clipboard = Some(action);
         app.set_files_open(false);
         app.set_clipboard_open(true);
     }
@@ -258,9 +349,13 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let clipboard_closing = state.clone();
     app.on_close_clipboard(move || {
         if let Some(app) = weak.upgrade() {
-            clipboard_closing.borrow_mut().files.pending_clipboard = None;
+            clipboard_closing
+                .borrow_mut()
+                .active
+                .files
+                .pending_clipboard = None;
             if app.get_files_connecting() || app.get_files_key_pending() {
-                clipboard_closing.borrow_mut().files.stop(&app);
+                clipboard_closing.borrow_mut().active.files.stop(&app);
             }
             app.set_clipboard_open(false);
             if app.get_connected() {
@@ -276,9 +371,9 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
         let result = (|| {
             let mut state = connecting.borrow_mut();
             if !app.get_connected() || state.updater.installing { return Err(Error::Transfer("Keep the Mac connection open while using SSH".into())); }
-            if state.files.client.is_some() { return Err(Error::Transfer("SSH is already connected or connecting".into())); }
-            if state.files.retiring.len() >= 4 { return Err(Error::Transfer("Wait for the previous SSH connection to close".into())); }
-            let profile = state.files.profile.clone().ok_or_else(|| Error::Transfer("Open Files or Clipboard from an active Mac connection".into()))?;
+            if state.active.files.client.is_some() { return Err(Error::Transfer("SSH is already connected or connecting".into())); }
+            if state.active.files.retiring.len() >= 4 { return Err(Error::Transfer("Wait for the previous SSH connection to close".into())); }
+            let profile = state.active.files.profile.clone().ok_or_else(|| Error::Transfer("Open Files or Clipboard from an active Mac connection".into()))?;
             let port = app.get_files_port().parse::<u16>().ok().filter(|&port| port != 0)
                 .ok_or_else(|| Error::Transfer("SSH port must be 1-65535".into()))?;
             let credentials = if app.get_files_use_saved() { CredentialSource::Saved } else {
@@ -289,7 +384,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
             let scope = state.audit.child(json!({"profile.id":profile.id,"server.address":profile.host,"server.port":port,"network.protocol.name":"ssh"}));
             let pinned = state.settings.ssh_host_keys.iter().find(|key| key.endpoint(&profile.host,port)).cloned();
             let client = Client::start(Request { profile,port,credentials,pinned,window:window_handle(&app)?,audit:scope.clone() })?;
-            state.files.scope = Some(scope); state.files.client = Some(client);
+            state.active.files.scope = Some(scope); state.active.files.client = Some(client);
             app.set_files_connecting(true); app.set_files_error("".into()); app.set_files_status("Verifying the Mac's SSH identity before using credentials...".into());
             Ok(())
         })();
@@ -303,7 +398,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
         let Some(app) = weak.upgrade() else { return; };
         let result = (|| {
             let mut state = approving.borrow_mut();
-            let (key,reply) = state.files.approval.take().ok_or_else(|| Error::Transfer("No host-key approval is pending".into()))?;
+            let (key,reply) = state.active.files.approval.take().ok_or_else(|| Error::Transfer("No host-key approval is pending".into()))?;
             if approved {
                 key.validate()?;
                 if let Some(existing) = state.settings.ssh_host_keys.iter().find(|old| old.endpoint(&key.host,key.port)) {
@@ -315,7 +410,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
                     state.settings.ssh_host_keys.push(key.clone());
                     if let Err(error) = state.persist() { state.settings.ssh_host_keys = old; return Err(error); }
                 }
-                scope(&state.files)?.critical("ssh.host_key.pinned",Level::Info,json!({"ssh.host_key.fingerprint.sha256":key.sha256,"server.address":key.host,"server.port":key.port}))?;
+                scope(&state.active.files)?.critical("ssh.host_key.pinned",Level::Info,json!({"ssh.host_key.fingerprint.sha256":key.sha256,"server.address":key.host,"server.port":key.port}))?;
             }
             reply.send(approved).map_err(|_| Error::Transfer("The SSH approval request is no longer active".into()))?;
             Ok(())
@@ -328,7 +423,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let disconnecting = state.clone();
     app.on_files_disconnect(move || {
         if let Some(app) = weak.upgrade() {
-            disconnecting.borrow_mut().files.stop(&app);
+            disconnecting.borrow_mut().active.files.stop(&app);
             app.set_files_status("SSH disconnected.".into());
         }
     });
@@ -337,7 +432,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     app.on_files_close(move || {
         if let Some(app) = weak.upgrade() {
             if app.get_files_connecting() || app.get_files_key_pending() {
-                closing.borrow_mut().files.stop(&app);
+                closing.borrow_mut().active.files.stop(&app);
             }
             app.set_files_open(false);
             if app.get_connected() {
@@ -351,6 +446,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
         if let Some(app) = weak.upgrade()
             && let Err(error) = browsing
                 .borrow()
+                .active
                 .files
                 .command(&app, Command::List(app.get_files_path().to_string()))
         {
@@ -362,10 +458,10 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     app.on_files_up(move || {
         if let Some(app) = weak.upgrade() {
             let state = up.borrow();
-            if let Err(error) = state
-                .files
-                .command(&app, Command::List(files::parent(&state.files.directory)))
-            {
+            if let Err(error) = state.active.files.command(
+                &app,
+                Command::List(files::parent(&state.active.files.directory)),
+            ) {
                 fail(&app, error);
             }
         }
@@ -381,26 +477,27 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
                 let state = entering.borrow();
                 let entry = usize::try_from(index)
                     .ok()
-                    .and_then(|index| state.files.entries.get(index))
+                    .and_then(|index| state.active.files.entries.get(index))
                     .ok_or_else(|| {
                         Error::Transfer("The selected file is no longer in this folder".into())
                     })?
                     .clone();
-                let remote = files::join(&state.files.directory, &entry.name)?;
+                let remote = files::join(&state.active.files.directory, &entry.name)?;
                 if entry.directory {
-                    return state.files.command(&app, Command::List(remote));
+                    return state.active.files.command(&app, Command::List(remote));
                 }
                 if !entry.regular {
                     return Err(Error::Transfer(
                         "Links and special files cannot be received".into(),
                     ));
                 }
-                (entry, remote, scope(&state.files)?.clone())
+                (entry, remote, scope(&state.active.files)?.clone())
             };
             let local = files::dialog::save(window_handle(&app)?, &safe_name(&entry.name))?;
             if let Some(local) = local {
                 entering
                     .borrow()
+                    .active
                     .files
                     .command(&app, Command::Download { remote, local })?;
             } else {
@@ -425,12 +522,15 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
         let result = (|| {
             let (directory, audit) = {
                 let state = uploading.borrow();
-                if state.files.directory.is_empty() {
+                if state.active.files.directory.is_empty() {
                     return Err(Error::Transfer(
                         "Open an accessible Mac folder before sending a file".into(),
                     ));
                 }
-                (state.files.directory.clone(), scope(&state.files)?.clone())
+                (
+                    state.active.files.directory.clone(),
+                    scope(&state.active.files)?.clone(),
+                )
             };
             let local = files::dialog::pick(window_handle(&app)?)?;
             let Some(local) = local else {
@@ -455,7 +555,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
                 app.get_files_upload_name().to_string()
             };
             files::valid_name(&name)?;
-            uploading.borrow().files.command(
+            uploading.borrow().active.files.command(
                 &app,
                 Command::Upload {
                     local,
@@ -473,7 +573,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     app.on_files_cancel(move || {
         if let Some(app) = weak.upgrade() {
             let state = cancelling.borrow();
-            if let Some(client) = &state.files.client {
+            if let Some(client) = &state.active.files.client {
                 client.cancel();
                 app.set_files_status("Cancelling and cleaning up temporary files...".into());
             }
@@ -504,19 +604,28 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
 }
 
 pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
-    while let Some(index) = state.files.retiring.iter().position(Client::is_finished) {
-        let client = state.files.retiring.remove(index);
-        state.files.received = state
+    while let Some(index) = state
+        .active
+        .files
+        .retiring
+        .iter()
+        .position(Client::is_finished)
+    {
+        let client = state.active.files.retiring.remove(index);
+        state.active.files.received = state
+            .active
             .files
             .received
             .saturating_add(client.counters.received.load(Ordering::Relaxed));
-        state.files.sent = state
+        state.active.files.sent = state
+            .active
             .files
             .sent
             .saturating_add(client.counters.sent.load(Ordering::Relaxed));
         client.finish()?;
     }
     while let Some(event) = state
+        .active
         .files
         .client
         .as_ref()
@@ -536,16 +645,16 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 app.set_files_key_command(
                     format!("ssh-keygen -lf /etc/ssh/ssh_host_{name}_key.pub -E sha256").into(),
                 );
-                state.files.approval = Some((key, reply));
+                state.active.files.approval = Some((key, reply));
                 app.set_files_key_pending(true);
                 if !app.get_clipboard_open() {
                     app.set_files_open(true);
                 }
             }
             Event::Connected => {
-                state.files.directory.clear();
-                state.files.entries.clear();
-                rows(app, &state.files);
+                state.active.files.directory.clear();
+                state.active.files.entries.clear();
+                rows(app, &state.active.files);
                 app.set_files_path(".".into());
                 app.set_files_directory_ready(false);
                 app.set_files_connected(true);
@@ -558,15 +667,16 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 }
             }
             Event::Directory { path, entries } => {
-                state.files.directory = path.clone();
-                state.files.entries = entries;
+                state.active.files.directory = path.clone();
+                state.active.files.entries = entries;
                 app.set_files_path(path.into());
-                rows(app, &state.files);
+                rows(app, &state.active.files);
                 app.set_files_directory_ready(true);
                 app.set_files_error("".into());
                 app.set_files_busy(false);
                 app.set_files_status(
                     state
+                        .active
                         .files
                         .last_outcome
                         .take()
@@ -577,23 +687,28 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 );
             }
             Event::Completed { description } => {
-                state.files.last_outcome = Some(description.clone());
+                state.active.files.last_outcome = Some(description.clone());
                 app.set_files_busy(false);
                 app.set_files_status(description.into());
                 state
+                    .active
                     .files
-                    .command(app, Command::List(state.files.directory.clone()))?;
+                    .command(app, Command::List(state.active.files.directory.clone()))?;
             }
             Event::Clipboard(text) => {
                 app.set_files_busy(false);
+                if !std::mem::take(&mut state.active.files.apply_clipboard_read) {
+                    app.set_files_status("Clipboard copy cancelled after switching Macs.".into());
+                    continue;
+                }
                 let result = state.clipboard.receive(window_handle(app)?,&text).and_then(|_| {
-                    scope(&state.files)?.critical("clipboard.applied",Level::Info,json!({"clipboard.direction":"mac_to_windows","clipboard.text_bytes":text.len(),"network.protocol.name":"ssh"}))
+                    scope(&state.active.files)?.critical("clipboard.applied",Level::Info,json!({"clipboard.direction":"mac_to_windows","clipboard.text_bytes":text.len(),"network.protocol.name":"ssh"}))
                 });
                 match result {
                     Ok(()) => app
                         .set_files_status("Mac plain text is now on the Windows clipboard.".into()),
                     Err(error) => {
-                        scope(&state.files)?.event(
+                        scope(&state.active.files)?.event(
                             "clipboard.apply_failed",
                             Level::Warn,
                             json!({"error.type":maccanvas::audit::error_type(&error)}),
@@ -612,16 +727,17 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
             }
             Event::Failed(error) => {
                 app.set_files_busy(false);
+                state.active.files.apply_clipboard_read = false;
                 fail(app, error);
             }
             Event::DirectoryFailed { path, error } => {
                 app.set_files_busy(false);
-                state.files.last_outcome = None;
-                let ready = !state.files.directory.is_empty();
+                state.active.files.last_outcome = None;
+                let ready = !state.active.files.directory.is_empty();
                 app.set_files_directory_ready(ready);
                 app.set_files_path(
                     if ready {
-                        state.files.directory.clone()
+                        state.active.files.directory.clone()
                     } else {
                         path.clone()
                     }
@@ -629,7 +745,7 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 );
                 app.set_files_status(
                     if ready {
-                        format!("SSH connected. Showing {}.", state.files.directory)
+                        format!("SSH connected. Showing {}.", state.active.files.directory)
                     } else {
                         "SSH connected. Enter a folder this account can access.".into()
                     }
@@ -641,20 +757,20 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 );
             }
             Event::Closed => {
-                state.files.stop(app);
+                state.active.files.stop(app);
             }
         }
     }
     if app.get_files_connected()
         && !app.get_files_busy()
-        && let Some(action) = state.files.pending_clipboard.take()
+        && let Some(action) = state.active.files.pending_clipboard.take()
         && let Err(error) = clipboard_command(app, state, action)
     {
         fail(app, error);
     }
-    if let Some(client) = &state.files.client {
+    if let Some(client) = &state.active.files.client {
         if client.is_finished() {
-            state.files.stop(app);
+            state.active.files.stop(app);
             return Ok(());
         }
         if app.get_files_busy() {
