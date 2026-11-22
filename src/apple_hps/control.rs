@@ -20,6 +20,7 @@ use crate::{
     geometry::Extent,
     input::Command,
     protocol::{Decoder, ServerInfo},
+    streaming::VIRTUAL_DISPLAY_RESOLUTIONS,
     telemetry::Metered,
 };
 
@@ -142,6 +143,45 @@ fn viewer_info() -> Vec<u8> {
     data
 }
 
+fn virtual_display(preferred: [u16; 2]) -> Result<Vec<u8>> {
+    // Apple SetDisplayConfiguration v1. The reference client puts the selected
+    // mode first and uses index zero for both current and preferred mode.
+    let mut modes = VIRTUAL_DISPLAY_RESOLUTIONS;
+    let selected = modes
+        .iter()
+        .position(|mode| *mode == preferred)
+        .ok_or_else(|| failed("unsupported virtual display resolution"))?;
+    modes.swap(0, selected);
+    const DESCRIPTOR_HEADER: usize = 0x9c;
+    const MODE_BYTES: usize = 28;
+    let descriptor_size = (DESCRIPTOR_HEADER + MODE_BYTES * modes.len()) as u16;
+    let mut message = vec![0x1d, 0];
+    message.extend_from_slice(&(8 + descriptor_size).to_be_bytes());
+    message.extend_from_slice(&[0, 1, 0, 1, 0, 0, 0, 0]); // version, display count, flags
+    let mut descriptor = [0; DESCRIPTOR_HEADER];
+    descriptor[..2].copy_from_slice(&descriptor_size.to_be_bytes());
+    let name = b"MacCanvas Virtual Display";
+    descriptor[2..2 + name.len()].copy_from_slice(name);
+    descriptor[0x7a..0x7e].copy_from_slice(&1_u32.to_be_bytes()); // dynamic-capable display
+    descriptor[0x7e..0x82].copy_from_slice(&4_u32.to_be_bytes()); // virtual display type
+    descriptor[0x82..0x86].copy_from_slice(&369.45456_f32.to_be_bytes()); // panel width in mm
+    descriptor[0x86..0x8a].copy_from_slice(&207.81818_f32.to_be_bytes()); // panel height in mm
+    descriptor[0x8a..0x8e].copy_from_slice(&3840_u32.to_be_bytes());
+    descriptor[0x8e..0x92].copy_from_slice(&2160_u32.to_be_bytes());
+    descriptor[0x96..0x9a].copy_from_slice(&7_u32.to_be_bytes()); // native rotation mask
+    descriptor[0x9a..0x9c].copy_from_slice(&(modes.len() as u16).to_be_bytes());
+    message.extend_from_slice(&descriptor);
+    for [width, height] in modes {
+        for dimension in [width, height, width, height] {
+            // backing pixels, logical points
+            message.extend_from_slice(&u32::from(dimension).to_be_bytes());
+        }
+        message.extend_from_slice(&60.0_f64.to_be_bytes());
+        message.extend_from_slice(&0_u32.to_be_bytes()); // SDR
+    }
+    Ok(message)
+}
+
 pub(super) fn set_encodings() -> Vec<u8> {
     let mut data = vec![2, 0, 0, ENCODINGS.len() as u8];
     for encoding in ENCODINGS {
@@ -173,13 +213,21 @@ pub(super) struct Channel {
 }
 
 impl Channel {
-    pub fn bootstrap(mut stream: Metered<TcpStream>, key: &[u8; 16]) -> Result<(Self, ServerInfo)> {
+    pub fn bootstrap(
+        mut stream: Metered<TcpStream>,
+        key: &[u8; 16],
+        virtual_resolution: Option<[u16; 2]>,
+    ) -> Result<(Self, ServerInfo)> {
         stream.write_all(&[0xc1])?;
         stream.flush()?;
         let width = word(&mut stream)?;
         let height = word(&mut stream)?;
         let size = Extent::new(u32::from(width), u32::from(height))?;
-        if size.width * size.height > 16_777_216 {
+        let fallback_size = match virtual_resolution {
+            Some([width, height]) => Extent::new(u32::from(width), u32::from(height))?,
+            None => size,
+        };
+        if fallback_size.width * fallback_size.height > 16_777_216 {
             return Err(failed("physical display exceeds the HEVC pixel limit"));
         }
         let mut format = [0; 16];
@@ -191,6 +239,9 @@ impl Channel {
         stream.write_all(&[0x12, 0, 0, 1, 0, 1, 0, 1, 0, 0, 0, 1])?;
         stream.flush()?;
         thread::sleep(Duration::from_millis(100));
+        if let Some(preferred) = virtual_resolution {
+            stream.write_all(&virtual_display(preferred)?)?;
+        }
         stream.write_all(&set_encodings())?;
         stream.flush()?;
         let mut cipher = None;
@@ -251,7 +302,7 @@ impl Channel {
                 wire: Vec::new(),
                 output: VecDeque::new(),
                 output_offset: 0,
-                fallback: Decoder::new(size),
+                fallback: Decoder::new(fallback_size),
                 cursor_cache: cursor::Cache::default(),
                 cursor: None,
             },
@@ -261,6 +312,16 @@ impl Channel {
 
     pub fn take_cursor(&mut self) -> Option<cursor::Update> {
         self.cursor.take()
+    }
+
+    fn resize_fallback(&mut self, size: Extent) -> Result<()> {
+        if size.width * size.height > 16_777_216 {
+            return Err(failed("display layout exceeds the HEVC pixel limit"));
+        }
+        if self.fallback.frame.size != size {
+            self.fallback.frame.resize(size);
+        }
+        Ok(())
     }
 
     pub fn send(&mut self, data: &[u8]) -> Result<()> {
@@ -410,6 +471,7 @@ impl Channel {
                                     u32::from(u16::from_be_bytes([data[6], data[7]])),
                                     u32::from(u16::from_be_bytes([data[8], data[9]])),
                                 )?;
+                                self.resize_fallback(backing)?;
                                 notices.push(Notice::Layout { scaled, backing });
                             } else if let Some(size) = offers::canvas(&data)? {
                                 notices.push(Notice::Canvas(size));
@@ -434,6 +496,7 @@ impl Channel {
                                 u32::from(u16::from_be_bytes([header[4], header[5]])),
                                 u32::from(u16::from_be_bytes([header[6], header[7]])),
                             )?;
+                            self.resize_fallback(size)?;
                             notices.push(Notice::Layout {
                                 scaled: size,
                                 backing: size,
@@ -474,12 +537,16 @@ pub(super) fn wait_canvas(
     let mut last_offer = Instant::now();
     while Instant::now() < deadline {
         punch()?;
+        let mut canvas = None;
         for notice in channel.poll()? {
             match notice {
-                Notice::Canvas(size) => return Ok((size, layout)),
+                Notice::Canvas(size) => canvas = Some(size),
                 Notice::Layout { scaled, backing } => layout = Some((scaled, backing)),
                 Notice::Unsupported(_) => (),
             }
+        }
+        if let Some(size) = canvas {
+            return Ok((size, layout));
         }
         if last_offer.elapsed() > Duration::from_secs(2) {
             channel.send(configuration)?;

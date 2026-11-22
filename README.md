@@ -14,7 +14,7 @@ One portable viewer. No extra DLLs or subscription.
 
 ## Features
 
-- **Sharp scaling:** fit a 4K desktop to your screen without changing the Mac's resolution.
+- **Sharp scaling:** larger desktops shrink to fit the window. Turn on **Fit view** in **Picture & connection** to enlarge smaller desktops too. Both modes preserve the Mac's aspect ratio.
 - **Visible cursor:** keep your normal Windows pointer and accessibility size.
 - **Easy connections:** searchable Mac list, quick connect, and an animated, collapsible sidebar.
 - **Protected logins:** Windows Credential Manager storage; **Windows Hello is mandatory for every saved login**. Saved passwords cannot be displayed.
@@ -80,9 +80,19 @@ bandwidth ranges. The Mac can choose a fallback or ignore compression hints.
 Choose **30 FPS** for lower decoding load or **60 FPS** for smoother motion.
 HEVC uses **Mac account** login and needs a compatible Apple-silicon Mac
 running macOS 14 or later and UDP access on the VNC port and the next port
-(normally `5900` and `5901`). It shares the physical desktop without changing
-the Mac's resolution or installing a Mac helper. Native CPU decoding is bundled;
-no Windows codec extension is required.
+(normally `5900` and `5901`). The default **Physical display** shares the Mac's
+existing desktop. Its available resolutions come from the Mac and the connected
+display. Native CPU decoding is bundled and works without a Windows codec
+extension or a Mac helper.
+
+For more desktop resolutions, open **Quality > Mac display** in either HEVC
+preset, choose a **Virtual display** size and click **Apply**. MacCanvas
+requests that starting size and advertises nine resolutions, from 1280 × 720 to
+3840 × 2160, including 2560 × 1440 and 3440 × 1440. Each uses one backing
+pixel per desktop point. You can also select among the modes macOS accepts in
+**System Settings > Displays** on the remote Mac. The Mac may blank its
+physical screen during a virtual-display session. Apple's virtual display limit
+is 3840 × 2160 pixels, or 1920 × 1080 in HiDPI. [Apple Screen Sharing options](https://support.apple.com/guide/mac-help/mchl1883115d/mac)
 
 The HEVC presets request different frame-rate ceilings, not fixed bitrates.
 Actual FPS depends on the Mac, network, and Windows decoding capacity. The VNC
@@ -119,9 +129,9 @@ HEVC60 is a ceiling, not a 60 FPS guarantee: older GPUs/CPUs, 4K, and slower lin
 may benefit from the HEVC30 preset. Run `--video-info` to inspect the installed
 adapters and decoder components; actual stream negotiation can still fall back.
 
-**Apply** reconnects the current Mac automatically when switching transports or
-HEVC presets, or changing the HEVC bitrate ceiling; saved logins require fresh
-Windows Hello approval. Other quality changes apply live. H.264 playback is not supported.
+**Apply** reconnects the current Mac when you change the transport, HEVC preset,
+Mac display or HEVC bitrate ceiling. Saved logins require fresh Windows Hello
+approval. Other quality changes apply live. H.264 playback is not supported.
 
 An idle HEVC desktop can remain connected at 0 FPS, including when video resumes
 after a long pause. Periodic video-port keepalives preserve the UDP/NAT path even

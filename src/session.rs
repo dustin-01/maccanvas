@@ -239,7 +239,7 @@ impl Session {
             && self.requires_reconnect(settings)
         {
             return Err(Error::Configuration(
-                "Changing transports, HEVC presets or the HEVC bitrate ceiling requires restarting the stream".into(),
+                "Changing the transport, HEVC preset, Mac display or HEVC bitrate ceiling requires restarting the stream".into(),
             ));
         }
         self.post(WriterCommand::Input(command))

@@ -18,6 +18,7 @@ import time
 
 ROOT = Path(__file__).resolve().parent.parent
 FORMAT = struct.pack("!BBBBHHHBBB3x", 32, 24, 0, 1, 255, 255, 255, 16, 8, 0)
+SMALL_DESKTOP = (160, 160)
 PRIME = int(
     "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1"
     "29024E088A67CC74020BBEA63B139B22514A08798E3404DD"
@@ -150,6 +151,7 @@ class Fixture:
         self.stop = threading.Event()
         self.authenticated = threading.Event()
         self.pause_updates = threading.Event()
+        self.shrink_desktop = threading.Event()
         self.expect_restart = threading.Event()
         self.restart_started = threading.Event()
         self.restart_continue = threading.Event()
@@ -181,7 +183,8 @@ class Fixture:
                 self.authenticated.set()
                 connection.sendall(b"\0\0\0\0")
                 read(connection, 1)
-                connection.sendall(struct.pack("!HH", 3840, 2160) + FORMAT
+                size = (3840, 2160)
+                connection.sendall(struct.pack("!HH", *size) + FORMAT
                                    + struct.pack("!I", 7) + b"Fixture")
                 sent = False
                 while not self.stop.is_set():
@@ -195,13 +198,22 @@ class Fixture:
                         self.offers.append(struct.unpack(f"!{count}i", read(connection, count * 4)))
                     elif kind == 3:
                         read(connection, 9)
-                        if not sent:
+                        if self.shrink_desktop.is_set() and size != SMALL_DESKTOP:
+                            size = SMALL_DESKTOP
+                            assert -223 in self.offers[-1]
+                            connection.sendall(b"\0\0\0\x01" + struct.pack("!HHHHi", 0, 0, *size, -223))
+                            sent = False
+                        elif not sent:
+                            half_width, half_height = size[0] // 2, size[1] // 2
                             connection.sendall(
-                                b"\0\0\0\x01" + struct.pack("!HHHHi", 0, 0, 3840, 2160, 0)
-                                + ((b"\0\0\xff\0" * 1920 + b"\0\xff\0\0" * 1920) * 1080)
-                                + ((b"\xff\0\0\0" * 1920 + b"\xff\xff\xff\0" * 1920) * 1080)
+                                b"\0\0\0\x01" + struct.pack("!HHHHi", 0, 0, *size, 0)
+                                + ((b"\0\0\xff\0" * half_width + b"\0\xff\0\0" * half_width) * half_height)
+                                + ((b"\xff\0\0\0" * half_width + b"\xff\xff\xff\0" * half_width) * half_height)
                             )
                             sent = True
+                        elif size == SMALL_DESKTOP:
+                            # The fit toggle must redraw the last frame, even while the Mac is idle.
+                            continue
                         else:
                             while self.pause_updates.is_set() and not self.stop.is_set():
                                 time.sleep(0.05)
@@ -312,6 +324,45 @@ def wait(predicate, process, fixture, description, timeout=20):
             return result
         time.sleep(0.05)
     raise AssertionError(f"Timed out: {description}; recent fixture pointer events: {fixture.pointers[-5:]}")
+
+
+def test_fit_view(process, fixture, window, bounds):
+    fixture.shrink_desktop.set()
+    width, height = SMALL_DESKTOP
+    center_x = bounds["x"] + bounds["width"] / 2
+    center_y = bounds["y"] + bounds["height"] / 2
+    scale = min(bounds["width"] / width, bounds["height"] / height)
+    assert scale > 2, "The fixture window must have room to enlarge the test desktop"
+
+    def shows_native_size():
+        return (pixel(window, center_x + width / 2 - 4, center_y - height / 4) == 0x00ff00
+                and pixel(window, center_x + width / 2 + 4, center_y - height / 4) == 0)
+
+    wait(shows_native_size, process, fixture, "small desktop centered at 1:1")
+    automate(process.pid, fixture.port, "toggle-fit-view")
+    draw_width, draw_height = int(width * scale), int(height * scale)
+    left, top = center_x - draw_width / 2, center_y - draw_height / 2
+    wait(lambda: (pixel(window, left + draw_width / 4, top + 6) == 0x0000ff
+                  and pixel(window, left + draw_width - 6, top + draw_height * 3 / 4) == 0xffffff),
+         process, fixture, "Fit view enlarged both axes to the canvas")
+    if left - bounds["x"] > 6:
+        assert pixel(window, left - 4, center_y) == 0, "Horizontal padding must remain black"
+    if top - bounds["y"] > 6:
+        assert pixel(window, center_x, top - 4) == 0, "Vertical padding must remain black"
+
+    point = wintypes.POINT(round(left + draw_width * 0.8), round(top + draw_height * 0.25))
+    before = len(fixture.pointers)
+    user32.SetPhysicalCursorPos(point.x, point.y)
+    if not user32.ScreenToClient(window, ctypes.byref(point)):
+        raise ctypes.WinError(ctypes.get_last_error())
+    coordinates = (point.y << 16) | (point.x & 0xffff)
+    user32.PostMessageW(window, 0x200, 0, coordinates)
+    wait(lambda: any(abs(x - 0.8 * width) <= 1 and abs(y - 0.25 * height) <= 1
+                     for _, x, y in fixture.pointers[before:]),
+         process, fixture, "off-center pointer mapped to the enlarged desktop")
+    automate(process.pid, fixture.port, "toggle-fit-view")
+    wait(shows_native_size, process, fixture, "small desktop restored to 1:1")
+    print("PASS: Fit view enlarges an idle desktop, preserves aspect and pointer position, and restores native size")
 
 
 def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_switch=False):
@@ -478,6 +529,7 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             wait(lambda: pixel(window, scaled_left + scaled_width / 4,
                                scaled_top + scaled_height / 4) == 0x0000ff,
                  process, fixture, "redraw after native window resize")
+            test_fit_view(process, fixture, window, resized)
             automate(process.pid, fixture.port, "fullscreen")
             time.sleep(0.5)
             fullscreen = automate(process.pid, fixture.port, "bounds")
@@ -506,7 +558,8 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             print("PASS: profiles contain neither username nor password")
             fixture.expect_restart.set()
             fixture.pause_updates.clear()
-            automate(process.pid, fixture.port, "switch-stream", ("-StreamMode", "hevc60"))
+            automate(process.pid, fixture.port, "switch-stream",
+                     ("-StreamMode", "hevc60", "-MacDisplay", "Virtual display · 2560 × 1440"))
             wait(fixture.restart_started.is_set, process, fixture,
                  "automatic same-endpoint VNC teardown and HEVC reopen")
             if cancel_switch:
@@ -522,10 +575,11 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             assert not select.select([fixture.listener], [], [], 0)[0], "Reconnect unexpectedly retried"
             after = json.loads((Path(data) / "settings.json").read_text())
             assert after["streaming"]["encoding"] == "hevc60"
+            assert after["streaming"]["virtual_display"] == [2560, 1440]
             assert after["streaming"]["max_fps"] == 60
             assert after["profiles"][0]["host"] == "127.0.0.1"
             assert after["profiles"][0]["port"] == fixture.port
-            print("PASS: HEVC60 defaults, automatic same-Mac restart, matching preset FPS, "
+            print("PASS: 2560×1440 virtual display selection, automatic same-Mac restart, matching preset FPS, "
                   + ("cancellation" if cancel_switch else "explicit negotiation failure")
                   + " and no retry loop")
         finally:
@@ -579,6 +633,7 @@ def main(executable, native_messages=False, ssh_fixture_executable=None, cancel_
             assert requests[0]["attributes"]["profile.id"] == requests[1]["attributes"]["profile.id"]
             assert requests[1]["attributes"]["credential.source"] == "manual"
             assert requests[1]["attributes"]["rfb.streaming"]["encoding"] == "hevc60"
+            assert requests[1]["attributes"]["rfb.streaming"]["virtual_display"] == [2560, 1440]
             assert names.index("session.connection.closed") < names.index(
                 "session.connection.requested", names.index("session.connection.requested") + 1
             )

@@ -30,7 +30,10 @@ use maccanvas::{
     profiles::{self, AuthMode, Profile, Settings},
     render::{Job, Renderer},
     session::{Event, Frames, Request, Session},
-    streaming::{Encoding, StreamSettings, encoding_name, parse_hevc_bitrate_mbps, raw_estimate},
+    streaming::{
+        Encoding, StreamSettings, VIRTUAL_DISPLAY_RESOLUTIONS, encoding_name,
+        parse_hevc_bitrate_mbps, raw_estimate,
+    },
     telemetry::{self, Monitor},
     theme,
     updates::{self, Updater},
@@ -110,6 +113,7 @@ impl State {
         self.audit.event("configuration.saved", Level::Info, json!({
             "profile.count":self.settings.profiles.len(), "ui.sidebar_open":self.settings.sidebar_open,
             "ui.show_fps":self.settings.show_fps, "input.ctrl_as_command":self.settings.ctrl_as_command,
+            "ui.fit_view":self.settings.fit_view,
             "rfb.streaming":self.settings.streaming,
             "audio.playback":self.settings.audio,
         }))
@@ -322,6 +326,7 @@ fn preferences(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     state.settings.ctrl_as_command = app.get_ctrl_as_command();
     state.settings.sidebar_open = app.get_sidebar_open();
     state.settings.show_fps = app.get_show_fps();
+    state.settings.fit_view = app.get_fit_view();
     state.persist()
 }
 
@@ -337,7 +342,7 @@ fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         let Some(size) = state.source_size else {
             return Ok(());
         };
-        let viewport = Viewport::fit(size, width, height, dpi)?;
+        let viewport = Viewport::for_canvas(size, width, height, dpi, app.get_fit_view())?;
         state.layout = (width, height, dpi);
         state.viewport = Some(viewport);
         state.ticket += 1;
@@ -858,8 +863,17 @@ fn tick_clipboard(app: &App, state: &mut State) -> Result<()> {
     Ok(())
 }
 
+fn mac_display_choices() -> impl Iterator<Item = Option<[u16; 2]>> {
+    std::iter::once(None).chain(VIRTUAL_DISPLAY_RESOLUTIONS.map(Some))
+}
+
 fn stream_form(app: &App, settings: StreamSettings) {
     app.set_encoding_index(settings.encoding.index());
+    app.set_mac_display_index(
+        mac_display_choices()
+            .position(|choice| choice == settings.virtual_display)
+            .unwrap_or(0) as i32,
+    );
     app.set_compression_level(f32::from(settings.compression));
     app.set_jpeg_quality(f32::from(settings.jpeg_quality));
     app.set_manual_bandwidth(settings.target_kbps != 0);
@@ -910,6 +924,9 @@ fn read_stream_form(app: &App) -> Result<StreamSettings> {
     };
     let settings = StreamSettings {
         encoding,
+        virtual_display: mac_display_choices()
+            .nth(app.get_mac_display_index() as usize)
+            .ok_or_else(|| Error::Configuration("Choose a Mac display".into()))?,
         compression: app.get_compression_level().round() as u8,
         jpeg_quality: app.get_jpeg_quality().round() as u8,
         target_kbps,
@@ -1222,6 +1239,7 @@ pub fn run(
     app.set_ctrl_as_command(settings.ctrl_as_command);
     app.set_sidebar_open(settings.sidebar_open || settings.profiles.is_empty());
     app.set_show_fps(settings.show_fps);
+    app.set_fit_view(settings.fit_view);
     app.set_clipboard_shared(settings.clipboard_enabled);
     app.set_audio_muted(settings.audio.muted);
     app.set_audio_volume(f32::from(settings.audio.volume));
@@ -1261,6 +1279,13 @@ pub fn run(
     app.set_traffic(ModelRc::from(Rc::new(VecModel::from(
         vec![TrafficBar::default(); telemetry::HISTORY],
     ))));
+    let display_labels = mac_display_choices()
+        .map(|choice| match choice {
+            None => "Physical display (default)".into(),
+            Some([width, height]) => format!("Virtual display · {width} × {height}").into(),
+        })
+        .collect::<Vec<_>>();
+    app.set_mac_display_choices(ModelRc::from(Rc::new(VecModel::from(display_labels))));
     stream_form(&app, settings.streaming);
     stream_summary(&app, settings.streaming);
     guide(&app, None);

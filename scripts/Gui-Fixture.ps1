@@ -5,7 +5,8 @@ param(
     [int]$SshPort,
     [string]$SshFingerprint,
     [ValidateSet('auto', 'hevc30', 'hevc60')][string]$StreamMode = 'auto',
-    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
+    [string]$MacDisplay,
+    [ValidateSet('connect', 'bounds', 'fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 trap {
@@ -100,6 +101,16 @@ switch ($Action) {
         (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         Set-FixtureStreamMode $StreamMode
+        if ($MacDisplay) {
+            $display = (Find-FixtureElement 'Mac display' ([Windows.Automation.ControlType]::ComboBox)).
+                GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern)
+            $display.SetValue($MacDisplay)
+            $deadline = [DateTime]::UtcNow.AddSeconds(5)
+            while ($display.Current.Value -cne $MacDisplay -and [DateTime]::UtcNow -lt $deadline) {
+                Start-Sleep -Milliseconds 50
+            }
+            if ($display.Current.Value -cne $MacDisplay) { throw 'The Mac display selector did not change.' }
+        }
         (Find-FixtureElement 'Apply' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     }
@@ -340,8 +351,17 @@ public static class MacCanvasOwnedDialogInput {
         (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     }
+    'toggle-fit-view' {
+        (Find-FixtureElement 'Stream quality' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+        (Find-FixtureElement 'Fit view' ([Windows.Automation.ControlType]::CheckBox)).
+            GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()
+        (Find-FixtureElement 'Close' ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
     'manual-quality' {
         $slider = Find-FixtureElement 'Compression effort' ([Windows.Automation.ControlType]::Slider)
+        Assert-FixtureElementAbsent 'Mac display'
         $slider.GetCurrentPattern([Windows.Automation.RangeValuePattern]::Pattern).SetValue(3)
         $toggle = Find-FixtureElement 'Use a manual bandwidth target' ([Windows.Automation.ControlType]::CheckBox)
         $toggle.GetCurrentPattern([Windows.Automation.TogglePattern]::Pattern).Toggle()

@@ -161,6 +161,7 @@ pub struct Client {
     scaled: Extent,
     backing: Extent,
     encoded: Extent,
+    previous_canvas: Option<(Extent, Instant)>,
     early: VecDeque<Vec<u8>>,
     candidates: Vec<Packet>,
     candidate_bytes: usize,
@@ -178,6 +179,7 @@ pub struct Client {
     started: Instant,
     fps_ceiling: u16,
     hevc_bitrate_bps: u32,
+    virtual_display: Option<[u16; 2]>,
     last_recovery: Instant,
     decoded: u64,
     rejected: u64,
@@ -219,7 +221,7 @@ impl Client {
             "event.outcome":"success","rfb.security.type":33,"rfb.authentication.variant":"rsa1",
             "rfb.protocol.version":"003.889",
         }))?;
-        let (mut channel, info) = Channel::bootstrap(stream, &key)?;
+        let (mut channel, info) = Channel::bootstrap(stream, &key, settings.virtual_display)?;
         drop(key);
         scope.critical(
             "media.hevc.control.ready",
@@ -283,7 +285,13 @@ impl Client {
         if canvas.width * canvas.height > 16_777_216 {
             return Err(failed("negotiated HEVC canvas exceeds the pixel limit"));
         }
-        let (scaled, backing) = layout.unwrap_or((info.size, canvas));
+        // ServerInit describes the physical desktop before a virtual display exists.
+        let default_scaled = if settings.virtual_display.is_some() {
+            canvas
+        } else {
+            info.size
+        };
+        let (scaled, backing) = layout.unwrap_or((default_scaled, canvas));
         channel.send(&control::refresh(backing))?;
         scope.critical(
             "media.hevc.transport.ready",
@@ -294,7 +302,8 @@ impl Client {
                 "media.width":canvas.width,"media.height":canvas.height,
                 "media.requested_fps":if sixty_fps {60} else {30},
                 "server.video.port":video_port,"server.control.port":peer.port(),
-                "media.decoder":"libde265","media.curtain":false,
+                "media.decoder":"libde265",
+                "media.virtual_display.requested":settings.virtual_display,
             }),
         )?;
         let receiver = Srtp::new(&offers.video_receive);
@@ -350,6 +359,7 @@ impl Client {
             scaled,
             backing,
             encoded: canvas,
+            previous_canvas: None,
             early,
             candidates: Vec::new(),
             candidate_bytes: 0,
@@ -367,6 +377,7 @@ impl Client {
             started: now,
             fps_ceiling: if sixty_fps { 60 } else { 30 },
             hevc_bitrate_bps: settings.hevc_bitrate_bps,
+            virtual_display: settings.virtual_display,
             last_recovery: now - Duration::from_secs(1),
             decoded: 0,
             rejected: 0,
@@ -460,9 +471,10 @@ impl Client {
                 if !settings.encoding.is_hevc()
                     || settings.encoding.fps_ceiling() != self.fps_ceiling
                     || settings.hevc_bitrate_bps != self.hevc_bitrate_bps
+                    || settings.virtual_display != self.virtual_display
                 {
                     return Err(failed(
-                        "reconnect before changing the HEVC preset, bitrate ceiling or transport",
+                        "reconnect before changing the HEVC preset, Mac display, bitrate ceiling or transport",
                     ));
                 }
                 self.pacer.set_fps(settings.max_fps.min(self.fps_ceiling));
@@ -628,6 +640,19 @@ impl Client {
             .collect()
     }
 
+    fn change_canvas(&mut self, size: Extent, now: Instant) -> Result<()> {
+        if size.width * size.height > 16_777_216 {
+            return Err(failed("negotiated HEVC canvas exceeds the pixel limit"));
+        }
+        if self.encoded != size {
+            // UDP can deliver pictures from the previous encoder after the
+            // new geometry arrives over TCP. Never display those late frames.
+            self.previous_canvas = Some((self.encoded, now));
+            self.encoded = size;
+        }
+        Ok(())
+    }
+
     pub fn poll(&mut self) -> Result<Option<Frame>> {
         let now = Instant::now();
         let stats_interval = if self.decoded == 0 { 3 } else { 60 };
@@ -642,9 +667,12 @@ impl Client {
         }
         for notice in self.channel.poll()? {
             match notice {
-                Notice::Canvas(size) => self.encoded = size,
+                Notice::Canvas(size) => self.change_canvas(size, now)?,
                 Notice::Layout { scaled, backing } => {
                     let changed = self.backing != backing;
+                    if changed && self.encoded == self.backing {
+                        self.change_canvas(backing, now)?;
+                    }
                     self.scaled = scaled;
                     self.backing = backing;
                     if changed {
@@ -748,6 +776,7 @@ impl Client {
                 }),
             )?;
             self.selected = Some(selected);
+            self.highest = 0;
             let mut candidates: Vec<_> = self
                 .candidates
                 .drain(..)
@@ -825,6 +854,12 @@ impl Client {
                     for frame in frames {
                         let size = frame.size();
                         if size != self.encoded {
+                            if self.previous_canvas.is_some_and(|(previous, changed)| {
+                                size == previous
+                                    && now.duration_since(changed) < Duration::from_secs(3)
+                            }) {
+                                continue;
+                            }
                             return Err(failed(format!(
                                 "decoded picture {}x{} does not match the negotiated {}x{} canvas",
                                 size.width, size.height, self.encoded.width, self.encoded.height

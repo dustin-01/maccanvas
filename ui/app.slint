@@ -73,6 +73,7 @@ export component App inherits Window {
     in-out property <bool> sidebar-open: true;
     in-out property <bool> editor-open: true;
     in-out property <bool> show-fps: true;
+    in-out property <bool> fit-view: false;
     in-out property <string> machine-filter;
     in property <[Machine]> machines;
     in property <int> selected: -1;
@@ -145,6 +146,8 @@ export component App inherits Window {
     in property <[TrafficBar]> traffic;
     in property <string> active-encoding: "Waiting for pixels";
     in-out property <int> encoding-index: 0;
+    in property <[string]> mac-display-choices;
+    in-out property <int> mac-display-index: 0;
     in-out property <float> compression-level: 6;
     in-out property <float> jpeg-quality: 8;
     in-out property <bool> manual-bandwidth: false;
@@ -232,6 +235,7 @@ export component App inherits Window {
     changed glass-enabled => { GlassTheme.effects = root.glass-enabled; }
     changed canvas-width => { root.canvas-resized(); }
     changed canvas-height => { root.canvas-resized(); }
+    changed fit-view => { root.canvas-resized(); }
     changed encoding-index => { root.quality-changed(); }
     changed machine-filter => { root.filter-machines(); }
     changed use-saved => { root.username = ""; root.password = ""; }
@@ -616,6 +620,19 @@ export component App inherits Window {
                             Caption { text: "Frame rate limit"; }
                             LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
                         }
+                        if root.encoding-index < 2 : VerticalLayout {
+                            spacing: 6px;
+                            Caption { text: "Mac display"; }
+                            ComboBox {
+                                accessible-label: "Mac display";
+                                accessible-action-set-value(value) => { self.current-value = value; }
+                                model: root.mac-display-choices;
+                                current-index <=> root.mac-display-index;
+                            }
+                            Text { text: "Choose a virtual display for more resolutions. Apply reconnects the session. The Mac’s physical screen may go blank until you disconnect."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                        }
+                        CheckBox { text: "Fit view"; checked <=> root.fit-view; toggled => { root.save-preferences(); } }
+                        Text { text: "Enlarge smaller desktops to fit the window while keeping their proportions."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                         CheckBox { text: "Show live FPS counter"; checked <=> root.show-fps; toggled => { root.save-preferences(); } }
                         Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/audio SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                     }

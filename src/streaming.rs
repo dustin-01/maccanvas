@@ -112,14 +112,27 @@ impl Encoding {
                 "Raw: no pixel compression and the lowest compression CPU cost. Best only on fast trusted links; full-frame 4K motion can require several gigabits per second."
             }
             Self::Hevc30 => {
-                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS; preserves the Mac's physical desktop. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Clipboard for encrypted text sharing."
+                "Apple High Performance HEVC/H.265 at up to 30 FPS. Lower stream and decoding load than 60 FPS. Requires Mac account login and UDP on the VNC port and the next port. A native decoder is bundled; no codec extension is needed. Apply reconnects automatically when needed. Use Clipboard for encrypted text sharing."
             }
             Self::Hevc60 => {
-                "Default: Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher decoding and bandwidth use. Uses the same physical Mac desktop, encrypted control and SRTP video, with native decoding and software fallback. Requires a compatible Mac, Mac account login and UDP on both media ports. Apply reconnects automatically when needed."
+                "Default: Apple High Performance HEVC/H.265 at up to 60 FPS. Smoother motion with higher decoding and bandwidth use. Uses encrypted control and SRTP video, with native decoding and software fallback. Requires a compatible Mac, Mac account login and UDP on both media ports. Apply reconnects automatically when needed."
             }
         }
     }
 }
+
+/// Logical desktop sizes advertised at one backing pixel per point.
+pub const VIRTUAL_DISPLAY_RESOLUTIONS: [[u16; 2]; 9] = [
+    [1280, 720],
+    [1440, 900],
+    [1600, 900],
+    [1920, 1080],
+    [1920, 1200],
+    [2560, 1440],
+    [2560, 1600],
+    [3440, 1440],
+    [3840, 2160],
+];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -129,6 +142,7 @@ pub struct StreamSettings {
     pub jpeg_quality: u8,
     pub target_kbps: u32,
     pub hevc_bitrate_bps: u32,
+    pub virtual_display: Option<[u16; 2]>,
     pub max_fps: u16,
 }
 
@@ -140,6 +154,7 @@ impl Default for StreamSettings {
             jpeg_quality: 8,
             target_kbps: 0,
             hevc_bitrate_bps: 0,
+            virtual_display: None,
             max_fps: 60,
         }
     }
@@ -148,7 +163,9 @@ impl Default for StreamSettings {
 impl StreamSettings {
     pub fn requires_reconnect(self, next: Self) -> bool {
         self.encoding.requires_reconnect(next.encoding)
-            || (self.encoding.is_hevc() && self.hevc_bitrate_bps != next.hevc_bitrate_bps)
+            || (self.encoding.is_hevc()
+                && (self.hevc_bitrate_bps != next.hevc_bitrate_bps
+                    || self.virtual_display != next.virtual_display))
     }
 
     pub fn validate_authentication(self, authentication: crate::profiles::AuthMode) -> Result<()> {
@@ -162,6 +179,13 @@ impl StreamSettings {
     }
 
     pub fn validate(self) -> Result<()> {
+        if let Some(size) = self.virtual_display
+            && !VIRTUAL_DISPLAY_RESOLUTIONS.contains(&size)
+        {
+            return Err(Error::Configuration(
+                "Choose a supported virtual display resolution".into(),
+            ));
+        }
         if self.encoding.is_hevc() && self.target_kbps != 0 {
             return Err(Error::Configuration(
                 "Use the HEVC bitrate ceiling instead of the VNC request-bandwidth target".into(),
@@ -327,6 +351,16 @@ mod tests {
             }
         }
         let current = StreamSettings::default();
+        let virtual_screen = StreamSettings {
+            virtual_display: Some([3840, 2160]),
+            ..current
+        };
+        assert!(current.requires_reconnect(virtual_screen));
+        assert!(virtual_screen.requires_reconnect(current));
+        assert!(virtual_screen.requires_reconnect(StreamSettings {
+            virtual_display: Some([2560, 1440]),
+            ..virtual_screen
+        }));
         let manual = StreamSettings {
             hevc_bitrate_bps: 125_500_000,
             ..current
@@ -344,6 +378,7 @@ mod tests {
         assert!(!vnc.requires_reconnect(StreamSettings {
             target_kbps: 500,
             hevc_bitrate_bps: manual.hevc_bitrate_bps,
+            virtual_display: virtual_screen.virtual_display,
             ..vnc
         }));
     }
@@ -385,8 +420,10 @@ mod tests {
         let existing: StreamSettings =
             serde_json::from_str(r#"{"encoding":"hevc30","max_fps":30}"#).unwrap();
         assert_eq!(existing.hevc_bitrate_bps, 0);
+        assert_eq!(existing.virtual_display, None);
         let manual = StreamSettings {
             hevc_bitrate_bps: 125_500_000,
+            virtual_display: Some([2560, 1440]),
             ..existing
         };
         let json = serde_json::to_string(&manual).unwrap();
@@ -466,6 +503,14 @@ mod tests {
 
     #[test]
     fn invalid_targets_and_indices_do_not_fall_back_silently() {
+        assert!(
+            StreamSettings {
+                virtual_display: Some([7680, 4320]),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
         assert!(
             StreamSettings {
                 target_kbps: 1,

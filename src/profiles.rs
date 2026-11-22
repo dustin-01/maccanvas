@@ -125,6 +125,8 @@ pub struct Settings {
     #[serde(default = "enabled")]
     pub show_fps: bool,
     #[serde(default)]
+    pub fit_view: bool,
+    #[serde(default)]
     pub streaming: StreamSettings,
     #[serde(default)]
     pub audio: crate::audio::Settings,
@@ -148,6 +150,7 @@ impl Default for Settings {
             legacy_dark_theme: None,
             sidebar_open: true,
             show_fps: true,
+            fit_view: false,
             streaming: StreamSettings::default(),
             audio: crate::audio::Settings::default(),
             clipboard_enabled: false,
@@ -266,8 +269,11 @@ mod tests {
         let mut settings = Settings::default();
         settings.save(&path).unwrap();
         settings.show_fps = false;
+        settings.fit_view = true;
         settings.save(&path).unwrap();
-        assert!(!Settings::load(&path).unwrap().show_fps);
+        let saved = Settings::load(&path).unwrap();
+        assert!(!saved.show_fps);
+        assert!(saved.fit_view);
     }
 
     #[test]
@@ -327,5 +333,6 @@ mod tests {
         assert!(!saved.contains("dark_theme"));
         assert_eq!(settings.streaming, StreamSettings::default());
         assert!(settings.show_fps);
+        assert!(!settings.fit_view);
     }
 }

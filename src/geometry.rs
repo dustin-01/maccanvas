@@ -67,6 +67,16 @@ pub struct Viewport {
 
 impl Viewport {
     pub fn fit(source: Extent, width: f32, height: f32, dpi: f32) -> Result<Self> {
+        Self::for_canvas(source, width, height, dpi, false)
+    }
+
+    pub fn for_canvas(
+        source: Extent,
+        width: f32,
+        height: f32,
+        dpi: f32,
+        allow_upscaling: bool,
+    ) -> Result<Self> {
         if !width.is_finite()
             || !height.is_finite()
             || !dpi.is_finite()
@@ -77,9 +87,9 @@ impl Viewport {
             return Err(Error::Display("Invalid canvas dimensions or DPI".into()));
         }
         let dpi = f64::from(dpi);
-        let factor = (f64::from(width) * dpi / f64::from(source.width))
-            .min(f64::from(height) * dpi / f64::from(source.height))
-            .min(1.0);
+        let fit = (f64::from(width) * dpi / f64::from(source.width))
+            .min(f64::from(height) * dpi / f64::from(source.height));
+        let factor = if allow_upscaling { fit } else { fit.min(1.0) };
         let pixels = Extent::new(
             (f64::from(source.width) * factor).floor().max(1.0) as u32,
             (f64::from(source.height) * factor).floor().max(1.0) as u32,
@@ -165,6 +175,31 @@ mod tests {
         let view = Viewport::fit(Extent::new(1280, 720).unwrap(), 2560.0, 1440.0, 1.0).unwrap();
         assert_eq!(view.pixels, Extent::new(1280, 720).unwrap());
         assert_eq!(view.left, 640.0);
+    }
+
+    #[test]
+    fn fit_view_enlarges_and_maps_a_letterboxed_desktop_at_high_dpi() {
+        let source = Extent::new(960, 640).unwrap();
+        let view = Viewport::for_canvas(source, 1280.0, 720.0, 2.0, true).unwrap();
+        assert_eq!(view.pixels, Extent::new(2160, 1440).unwrap());
+        assert_eq!(
+            (view.left, view.top, view.width, view.height),
+            (100.0, 0.0, 1080.0, 720.0)
+        );
+        assert_eq!(view.to_remote(100.0, 0.0, false), Some((0, 0)));
+        assert_eq!(view.to_remote(640.0, 360.0, false), Some((480, 320)));
+        assert_eq!(view.to_remote(1179.5, 719.5, false), Some((959, 639)));
+        assert_eq!(view.to_remote(1180.0, 400.0, false), None);
+        assert_eq!(view.to_remote(1180.0, 720.0, true), Some((959, 639)));
+    }
+
+    #[test]
+    fn both_modes_downscale_large_desktops_identically() {
+        let source = Extent::new(3840, 2160).unwrap();
+        assert_eq!(
+            Viewport::for_canvas(source, 1280.0, 720.0, 1.5, true).unwrap(),
+            Viewport::fit(source, 1280.0, 720.0, 1.5).unwrap()
+        );
     }
 
     #[test]

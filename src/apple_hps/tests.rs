@@ -1,6 +1,6 @@
 use std::{
     io::{Read, Write},
-    net::{TcpListener, TcpStream, UdpSocket},
+    net::{SocketAddr, TcpListener, TcpStream, UdpSocket},
     sync::{Arc, Mutex, mpsc},
     thread,
     time::{Duration, Instant},
@@ -31,6 +31,7 @@ const SAMPLE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "\\crates\\native-hevc\\tests\\data\\pattern444.hevc"
 ));
+const SAMPLE_4K: &[u8] = include_bytes!("../../crates/native-hevc/tests/data/quadrants444_4k.hevc");
 
 fn read_u32(stream: &mut impl Read) -> u32 {
     let mut bytes = [0; 4];
@@ -70,9 +71,9 @@ fn nals(data: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-fn media_payloads() -> Vec<Vec<u8>> {
+fn media_payloads(sample: &[u8]) -> Vec<Vec<u8>> {
     let mut out = Vec::new();
-    for (don, nal) in nals(SAMPLE).into_iter().enumerate() {
+    for (don, nal) in nals(sample).into_iter().enumerate() {
         assert!(nal.len() >= 2);
         if nal.len() < 1000 {
             let mut payload = nal[..2].to_vec();
@@ -98,6 +99,34 @@ fn media_payloads() -> Vec<Vec<u8>> {
     out
 }
 
+fn send_picture(
+    socket: &UdpSocket,
+    peer: SocketAddr,
+    encryption: &mut SrtpSender,
+    sample: &[u8],
+    timestamp: u32,
+) {
+    let payloads = media_payloads(sample);
+    for (index, payload) in payloads.iter().enumerate() {
+        let wire = encryption
+            .packet(payload, timestamp, 100, index + 1 == payloads.len())
+            .unwrap();
+        socket.send_to(&wire, peer).unwrap();
+    }
+}
+
+fn layout_rectangle(scaled: [u16; 2], backing: [u16; 2]) -> Vec<u8> {
+    let mut rectangle = vec![0; 8];
+    rectangle.extend_from_slice(&1105_i32.to_be_bytes());
+    rectangle.extend_from_slice(&20_u16.to_be_bytes());
+    rectangle.extend_from_slice(&1_u16.to_be_bytes());
+    for dimension in scaled.into_iter().chain(backing) {
+        rectangle.extend_from_slice(&dimension.to_be_bytes());
+    }
+    rectangle.extend_from_slice(&[0; 10]);
+    rectangle
+}
+
 fn media_answer() -> Vec<u8> {
     let mut encoded = ZlibEncoder::new(Vec::new(), Compression::default());
     encoded
@@ -117,16 +146,7 @@ fn media_answer() -> Vec<u8> {
     combined.extend_from_slice(&plist);
     plist = combined;
     let mut message = vec![0, 0, 0, 3];
-    message.extend_from_slice(&[0; 8]);
-    message.extend_from_slice(&1105_i32.to_be_bytes());
-    message.extend_from_slice(&20_u16.to_be_bytes());
-    let mut layout = vec![0; 20];
-    layout[..2].copy_from_slice(&1_u16.to_be_bytes());
-    layout[2..4].copy_from_slice(&32_u16.to_be_bytes());
-    layout[4..6].copy_from_slice(&24_u16.to_be_bytes());
-    layout[6..8].copy_from_slice(&64_u16.to_be_bytes());
-    layout[8..10].copy_from_slice(&48_u16.to_be_bytes());
-    message.extend_from_slice(&layout);
+    message.extend_from_slice(&layout_rectangle([32, 24], [64, 48]));
     message.extend_from_slice(&[0; 8]);
     message.extend_from_slice(&1010_i32.to_be_bytes());
     message.extend_from_slice(&(plist.len() as u16).to_be_bytes());
@@ -144,15 +164,15 @@ fn media_answer() -> Vec<u8> {
 
 #[test]
 fn encrypted_apple_peer_decodes_real_hevc_and_preserves_input_and_hello_gates() {
-    encrypted_apple_peer(false);
+    encrypted_apple_peer(false, None);
 }
 
 #[test]
 fn unexpected_hevc_control_disconnect_requests_automatic_reconnect() {
-    encrypted_apple_peer(true);
+    encrypted_apple_peer(true, Some([2560, 1440]));
 }
 
-fn encrypted_apple_peer(drop_connection: bool) {
+fn encrypted_apple_peer(drop_connection: bool, virtual_display: Option<[u16; 2]>) {
     let _peer_test = PEER_TEST.lock().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let mut audit = Audit::start(directory.path().join("audit")).unwrap();
@@ -212,8 +232,15 @@ fn encrypted_apple_peer(drop_connection: bool) {
         socket.read_exact(&mut init).unwrap();
         assert_eq!(init, [0xc1]);
         let mut info = Vec::new();
-        info.extend_from_slice(&64_u16.to_be_bytes());
-        info.extend_from_slice(&48_u16.to_be_bytes());
+        // A 6K physical screen can host a smaller virtual desktop.
+        let physical: [u16; 2] = if virtual_display.is_some() {
+            [6016, 3384]
+        } else {
+            [64, 48]
+        };
+        for dimension in physical {
+            info.extend_from_slice(&dimension.to_be_bytes());
+        }
         info.extend_from_slice(&crate::protocol::PIXEL_FORMAT);
         let name = "HEVC \u{2019} fixture";
         let mut extended_name = vec![0; 22];
@@ -225,8 +252,38 @@ fn encrypted_apple_peer(drop_connection: bool) {
         let mut prelude = [0; 78];
         socket.read_exact(&mut prelude).unwrap();
         assert_eq!(&prelude[..4], &[0x21, 0, 0, 62]);
+        if let Some(preferred) = virtual_display {
+            let mut header = [0; 4];
+            socket.read_exact(&mut header).unwrap();
+            assert_eq!(&header[..2], &[0x1d, 0]);
+            let mut body = vec![0; usize::from(u16::from_be_bytes([header[2], header[3]]))];
+            socket.read_exact(&mut body).unwrap();
+            assert_eq!(&body[..8], &[0, 1, 0, 1, 0, 0, 0, 0]);
+            let descriptor = &body[8..];
+            let count = crate::streaming::VIRTUAL_DISPLAY_RESOLUTIONS.len();
+            assert_eq!(descriptor.len(), 0x9c + count * 28);
+            assert_eq!(&descriptor[..2], &(descriptor.len() as u16).to_be_bytes());
+            assert_eq!(&descriptor[0x9a..0x9c], &(count as u16).to_be_bytes());
+            assert_eq!(&descriptor[0x92..0x96], &[0; 4]);
+            assert_eq!(read_u32(&mut &descriptor[0x8a..]), 3840);
+            assert_eq!(read_u32(&mut &descriptor[0x8e..]), 2160);
+            let mut sizes = Vec::new();
+            for mut mode in descriptor[0x9c..].chunks_exact(28) {
+                let backing = [read_u32(&mut mode), read_u32(&mut mode)];
+                let logical = [read_u32(&mut mode), read_u32(&mut mode)];
+                assert_eq!(backing, logical);
+                assert_eq!(&mode[..8], &60.0_f64.to_be_bytes());
+                assert_eq!(&mode[8..], &[0; 4]);
+                sizes.push(logical);
+            }
+            assert_eq!(sizes[0], preferred.map(u32::from));
+            for mode in crate::streaming::VIRTUAL_DISPLAY_RESOLUTIONS {
+                assert!(sizes.contains(&mode.map(u32::from)));
+            }
+        }
         let mut encodings = [0; 4];
         socket.read_exact(&mut encodings).unwrap();
+        assert_eq!(&encodings[..2], &[2, 0]);
         let mut methods =
             vec![0; usize::from(u16::from_be_bytes([encodings[2], encodings[3]])) * 4];
         socket.read_exact(&mut methods).unwrap();
@@ -258,14 +315,9 @@ fn encrypted_apple_peer(drop_connection: bool) {
         socket
             .write_all(&cipher.encrypt(&media_answer()).unwrap())
             .unwrap();
-        let payloads = media_payloads();
+        let video_peer = SocketAddr::new(peer.ip(), port + 1);
         let mut encryption = SrtpSender::new(&media_key, 0x1234);
-        for (index, payload) in payloads.iter().enumerate() {
-            let wire = encryption
-                .packet(payload, 123456, 100, index + 1 == payloads.len())
-                .unwrap();
-            video_socket.send_to(&wire, (peer.ip(), port + 1)).unwrap();
-        }
+        send_picture(&video_socket, video_peer, &mut encryption, SAMPLE, 123456);
         let mut audio_sender = SrtpSender::new(&audio_key, 0x5678);
         let mut audio = &include_bytes!("../../tests/data/apple-aac-eld-stereo.aaceld")[..];
         let mut timestamp = 0u32;
@@ -305,6 +357,23 @@ fn encrypted_apple_peer(drop_connection: bool) {
             }
         }
         assert_eq!(wheel, [10, 2, 10, 2, 10, 2, 34, 2, 34, 2]);
+        if virtual_display.is_some() {
+            let mut resize = vec![0, 0, 0, 1];
+            resize.extend_from_slice(&layout_rectangle([3840, 2160], [3840, 2160]));
+            socket.write_all(&cipher.encrypt(&resize).unwrap()).unwrap();
+            // Wait until the client has processed the host's new layout.
+            while read_record(&mut socket, &mut cipher)[0] != 0x1c {}
+            // Delayed pixels at the old size can cross the TCP layout update.
+            // The same RTP stream continues with a new 4K intra picture.
+            send_picture(&video_socket, video_peer, &mut encryption, SAMPLE, 126456);
+            send_picture(
+                &video_socket,
+                video_peer,
+                &mut encryption,
+                SAMPLE_4K,
+                129456,
+            );
+        }
         video_socket.set_nonblocking(true).unwrap();
         let mut keepalive = [0; 4];
         loop {
@@ -324,14 +393,17 @@ fn encrypted_apple_peer(drop_connection: bool) {
             assert_eq!(&keepalive[..length], &[0]);
         }
         observed.send(()).unwrap();
-        if shutdown_requested
-            .recv_timeout(Duration::from_secs(10))
-            .unwrap()
-        {
-            return;
+        if drop_connection {
+            shutdown_requested
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
         }
-        let mut tail = [0];
-        let _ = socket.read(&mut tail);
+        // Keep the peer alive through Session::finish. A pending heartbeat can
+        // satisfy a one-byte read before the client initiates its shutdown.
+        shutdown_requested
+            .recv_timeout(Duration::from_secs(10))
+            .unwrap();
     });
     let (events, receiver) = mpsc::channel();
     let frames = Arc::new(Mutex::new(None));
@@ -352,6 +424,7 @@ fn encrypted_apple_peer(drop_connection: bool) {
             streaming: StreamSettings {
                 encoding: Encoding::Hevc30,
                 hevc_bitrate_bps: 125_500_000,
+                virtual_display,
                 ..Default::default()
             },
             audio: crate::audio::Settings {
@@ -421,6 +494,7 @@ fn encrypted_apple_peer(drop_connection: bool) {
     let live_settings = StreamSettings {
         encoding: Encoding::Hevc30,
         hevc_bitrate_bps: 125_500_000,
+        virtual_display,
         max_fps: 20,
         ..Default::default()
     };
@@ -463,6 +537,23 @@ fn encrypted_apple_peer(drop_connection: bool) {
         .unwrap();
     received.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(!session.is_closed());
+    if virtual_display.is_some() {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(frame) = frames.lock().unwrap().as_ref()
+                && (frame.size.width, frame.size.height) == (3840, 2160)
+            {
+                assert!(frame.rgba[0] >= 253);
+                assert!(frame.rgba[1] <= 1 && frame.rgba[2] <= 1);
+                break;
+            }
+            assert!(
+                !session.is_closed() && Instant::now() < deadline,
+                "The host's 4K mode change must produce a new image within the same session"
+            );
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
     let audio_deadline = Instant::now() + Duration::from_secs(5);
     while !std::fs::read_to_string(audit.audit().path())
         .unwrap()
@@ -474,8 +565,8 @@ fn encrypted_apple_peer(drop_connection: bool) {
         );
         thread::sleep(Duration::from_millis(5));
     }
-    shutdown.send(drop_connection).unwrap();
     if drop_connection {
+        shutdown.send(()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut failure_reported = false;
         loop {
@@ -496,6 +587,7 @@ fn encrypted_apple_peer(drop_connection: bool) {
         }
     }
     session.finish().unwrap();
+    shutdown.send(()).unwrap();
     if !drop_connection {
         assert!(
             receiver
