@@ -30,12 +30,15 @@ export component Button inherits Rectangle {
     in property <string> text;
     in property <image> icon;
     in property <bool> primary: false;
+    in property <bool> destructive: false;
     in property <bool> quiet: false;
+    in property <bool> underlined: false;
+    in property <bool> elide-text: false;
     in property <bool> enabled: true;
     callback clicked();
     property <bool> key-down: false;
     property <bool> pressed: pointer.pressed || key-down;
-    property <color> foreground: root.primary ? #ffffff : GlassTheme.ink;
+    property <color> foreground: root.primary || root.destructive ? #ffffff : GlassTheme.ink;
     changed enabled => { if !root.enabled { root.key-down = false; } }
     min-width: max(36px, content.min-width);
     min-height: 34px;
@@ -47,9 +50,9 @@ export component Button inherits Rectangle {
     border-radius: 12px;
     clip: true;
     border-width: 1px;
-    border-color: root.primary ? (GlassTheme.dark ? #409cff : #0070e8)
+    border-color: root.destructive ? #aa2632 : root.primary ? (GlassTheme.dark ? #409cff : #0070e8)
         : (root.quiet ? transparent : GlassTheme.edge);
-    background: root.primary ? GlassTheme.accent
+    background: root.destructive ? #ba2938 : root.primary ? GlassTheme.accent
         : (root.quiet ? transparent : (GlassTheme.dark ? #2c2c2ecc : #ffffffeb));
     opacity: root.enabled ? 1 : 0.4;
     accessible-role: button;
@@ -75,6 +78,12 @@ export component Button inherits Rectangle {
         }
         if root.text != "" : Text {
             text: root.text; color: root.foreground;
+            overflow: root.elide-text ? TextOverflow.elide : TextOverflow.clip;
+            if root.underlined : Rectangle {
+                width: parent.preferred-width; height: 1px;
+                x: (parent.width - self.width) / 2; y: (parent.height + parent.preferred-height) / 2 - 1px;
+                background: root.foreground;
+            }
             font-size: 13px; font-weight: root.primary ? 600 : 500;
             horizontal-alignment: center; vertical-alignment: center; accessible-role: none;
         }
@@ -169,6 +178,7 @@ export component CheckBox inherits Rectangle {
 }
 
 export component Slider inherits Rectangle {
+    out property <bool> dragging: pointer.pressed;
     in property <float> minimum: 0;
     in property <float> maximum: 100;
     in property <float> step: 1;

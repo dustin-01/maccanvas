@@ -42,7 +42,7 @@ export component AudioOverlay inherits Rectangle {
                 }
                 Text { text: "Playback follows your Windows output device. These controls do not change the Mac's volume. No microphone audio is captured or sent."; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
                 if root.connected && root.supported && !root.missing : Button { text: "Retry audio"; enabled: !root.installing; clicked => { root.retry(); } }
-                Text { text: "Enabling or retrying audio reconnects an active HEVC stream automatically. Saved logins require Windows Hello again."; color: GlassTheme.muted; font-size: 11px; wrap: word-wrap; }
+                Text { text: "Enabling or retrying audio reconnects an active HEVC stream automatically."; color: GlassTheme.muted; font-size: 11px; wrap: word-wrap; }
             }
         }
     }

@@ -51,6 +51,7 @@ pub struct Request {
     pub streaming: StreamSettings,
     pub audio: crate::audio::Settings,
     pub remember: bool,
+    pub require_windows_hello: bool,
     pub window: isize,
     pub generation: u64,
     pub audit: Scope,
@@ -379,6 +380,7 @@ fn run(
     let credentials = credentials::resolve(
         request.profile.id,
         request.credentials,
+        request.require_windows_hello,
         &AuditedConsent {
             scope: &request.audit,
             window: request.window,

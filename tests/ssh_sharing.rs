@@ -148,6 +148,7 @@ impl Fixture {
                 CredentialSource::Manual(Credentials::new("fixture".into(), PASSWORD.into()))
             },
             pinned,
+            require_windows_hello: true,
             window: 0,
             audit: guard.audit().scope(json!({"test.fixture":"ssh"})),
         })

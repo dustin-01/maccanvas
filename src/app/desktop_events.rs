@@ -49,6 +49,7 @@ pub(super) fn route(
                 app.set_use_saved(profile.has_saved_credentials);
             }
             if foreground {
+                state.settings.record_mac_use(profile.id);
                 desktops::show(app, &state);
             }
             model(app, &state);

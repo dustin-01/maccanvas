@@ -115,7 +115,15 @@ impl SshHostKey {
 pub struct Settings {
     pub version: u32,
     pub profiles: Vec<Profile>,
+    #[serde(default)]
+    pub recent_macs: Vec<Uuid>,
     pub ctrl_as_command: bool,
+    #[serde(default = "normal_scroll_position")]
+    pub scroll_speed_position: u8,
+    #[serde(default)]
+    pub capture_cursor_fullscreen: bool,
+    #[serde(default = "enabled")]
+    pub require_windows_hello: bool,
     #[serde(default, rename = "hello_for_all_connections", skip_serializing)]
     pub legacy_hello_for_all: Option<bool>,
     #[serde(default, rename = "dark_theme", skip_serializing)]
@@ -140,12 +148,20 @@ fn enabled() -> bool {
     true
 }
 
+fn normal_scroll_position() -> u8 {
+    50
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
             version: 1,
             profiles: Vec::new(),
+            recent_macs: Vec::new(),
             ctrl_as_command: true,
+            scroll_speed_position: normal_scroll_position(),
+            capture_cursor_fullscreen: false,
+            require_windows_hello: true,
             legacy_hello_for_all: None,
             legacy_dark_theme: None,
             sidebar_open: true,
@@ -160,9 +176,34 @@ impl Default for Settings {
 }
 
 impl Settings {
+    pub fn record_mac_use(&mut self, id: Uuid) -> bool {
+        if self.recent_macs.first() == Some(&id) {
+            return false;
+        }
+        self.recent_macs.retain(|recent| *recent != id);
+        self.recent_macs.insert(0, id);
+        true
+    }
+
+    pub fn profiles_by_recency(&self) -> Vec<&Profile> {
+        let mut profiles: Vec<_> = self.profiles.iter().collect();
+        profiles.sort_by_key(|profile| {
+            self.recent_macs
+                .iter()
+                .position(|id| *id == profile.id)
+                .unwrap_or(usize::MAX)
+        });
+        profiles
+    }
+
     pub fn validate(&self) -> Result<()> {
         self.streaming.validate()?;
         self.audio.validate()?;
+        if self.scroll_speed_position > 100 {
+            return Err(Error::Configuration(
+                "Scroll speed position exceeds 100".into(),
+            ));
+        }
         if self.version != 1 || self.profiles.len() > 128 || self.ssh_host_keys.len() > 128 {
             return Err(Error::Configuration(
                 "Unsupported settings version or too many machines".into(),
@@ -225,6 +266,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn picker_order_survives_restart_and_preserves_unused_mac_order() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("settings.json");
+        let mut settings = Settings::default();
+        for name in ["A", "B", "C", "D"] {
+            settings.profiles.push(Profile {
+                id: Uuid::new_v4(),
+                name: name.into(),
+                host: "mac.local".into(),
+                port: 5900,
+                authentication: AuthMode::MacLogin,
+                has_saved_credentials: false,
+            });
+        }
+        for index in [3, 1, 3] {
+            settings.record_mac_use(settings.profiles[index].id);
+        }
+        settings.save(&path).unwrap();
+        let restored = Settings::load(&path).unwrap();
+        let names: Vec<_> = restored
+            .profiles_by_recency()
+            .into_iter()
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(names, ["D", "B", "A", "C"]);
+    }
+
+    #[test]
     fn ssh_keys_are_validated_even_when_no_machines_are_saved() {
         let settings = Settings {
             ssh_host_keys: vec![SshHostKey {
@@ -270,10 +339,16 @@ mod tests {
         settings.save(&path).unwrap();
         settings.show_fps = false;
         settings.fit_view = true;
+        settings.capture_cursor_fullscreen = true;
+        settings.scroll_speed_position = 0;
+        settings.require_windows_hello = false;
         settings.save(&path).unwrap();
         let saved = Settings::load(&path).unwrap();
         assert!(!saved.show_fps);
         assert!(saved.fit_view);
+        assert!(saved.capture_cursor_fullscreen);
+        assert_eq!(saved.scroll_speed_position, 0);
+        assert!(!saved.require_windows_hello);
     }
 
     #[test]
@@ -324,15 +399,17 @@ mod tests {
     }
 
     #[test]
-    fn migrates_old_theme_and_hello_preferences_without_saving_toggles() {
+    fn legacy_preferences_keep_saved_login_verification_enabled() {
         let json = r#"{"version":1,"profiles":[],"ctrl_as_command":true,"hello_for_all_connections":false,"dark_theme":true}"#;
         let settings: Settings = serde_json::from_str(json).unwrap();
         settings.validate().unwrap();
         let saved = serde_json::to_string(&settings).unwrap();
         assert!(!saved.contains("hello_for_all"));
+        assert!(settings.require_windows_hello);
         assert!(!saved.contains("dark_theme"));
         assert_eq!(settings.streaming, StreamSettings::default());
         assert!(settings.show_fps);
         assert!(!settings.fit_view);
+        assert_eq!(settings.scroll_speed_position, 50);
     }
 }

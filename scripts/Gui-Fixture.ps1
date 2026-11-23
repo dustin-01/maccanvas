@@ -7,7 +7,7 @@ param(
     [ValidateSet('auto', 'hevc30', 'hevc60')][string]$StreamMode = 'auto',
     [string]$MacDisplay,
     [string]$MachineName = 'Fixture Mac',
-    [ValidateSet('connect', 'connect-another', 'cancel-pending-card', 'check-card-actions', 'select-switcher', 'preview-bounds', 'bounds', 'fullscreen', 'reveal-fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
+    [ValidateSet('connect', 'connect-another', 'cancel-pending-card', 'disconnect-card', 'check-card-actions', 'select-switcher', 'preview-bounds', 'bounds', 'fullscreen', 'reveal-fullscreen', 'exit-fullscreen', 'disconnect', 'cancel', 'switch-stream', 'focus', 'toggle-sidebar', 'telemetry', 'quality', 'manual-quality', 'close-quality', 'toggle-fit-view', 'show-macs', 'new', 'saved-login-check', 'panels', 'ssh-dialogs', 'audio-settings', 'audio-vnc', 'enable-audio')][string]$Action = 'bounds'
 )
 $ErrorActionPreference = 'Stop'
 trap {
@@ -461,11 +461,15 @@ public static class MacCanvasOwnedDialogInput {
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         Connect-FixtureMac
     }
+    'disconnect-card' {
+        (Find-FixtureElement "Disconnect $MachineName" ([Windows.Automation.ControlType]::Button)).
+            GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
+    }
     'check-card-actions' {
         $connect = Find-FixtureElement 'Connect' ([Windows.Automation.ControlType]::Button)
-        $connected = Find-FixtureElement 'Connected' ([Windows.Automation.ControlType]::Button)
-        if (-not $connect.Current.IsEnabled -or $connected.Current.IsEnabled) {
-            throw 'The idle Mac must allow Connect, and the connected Mac must disable Connected.'
+        $disconnect = Find-FixtureElement 'Disconnect Studio Mac' ([Windows.Automation.ControlType]::Button)
+        if (-not $connect.Current.IsEnabled -or -not $disconnect.Current.IsEnabled) {
+            throw 'The idle Mac must allow Connect, and the connected Mac must allow Disconnect.'
         }
         $bounds = $connect.Current.BoundingRectangle
         $rowCenter = $bounds.Y + $bounds.Height / 2

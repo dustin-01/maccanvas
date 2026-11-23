@@ -57,8 +57,11 @@ impl PeerSocket {
         let port = match ports.entry(local) {
             Entry::Occupied(entry) => entry.into_mut(),
             Entry::Vacant(entry) => {
-                let socket = UdpSocket::bind(local).map_err(|error| {
-                    super::failed(format!("cannot bind UDP port {}: {error}", local.port()))
+                let socket = UdpSocket::bind(local).map_err(|source| {
+                    crate::error::Error::ScreenSharingPort {
+                        port: local.port(),
+                        source,
+                    }
                 })?;
                 SockRef::from(&socket).set_recv_buffer_size(BUFFER_BYTES)?;
                 socket.set_nonblocking(true)?;

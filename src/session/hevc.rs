@@ -32,6 +32,7 @@ pub(super) fn run(
     let credentials = credentials::resolve(
         request.profile.id,
         request.credentials,
+        request.require_windows_hello,
         &AuditedConsent {
             scope: &request.audit,
             window: request.window,

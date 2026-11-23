@@ -53,6 +53,7 @@ fn runtime_log_failure_is_sticky_and_blocks_vnc_and_ssh_before_credentials_or_ne
         port,
         credentials: CredentialSource::Saved,
         pinned: None,
+        require_windows_hello: true,
         window: 0,
         audit: scope.clone(),
     });
@@ -65,6 +66,7 @@ fn runtime_log_failure_is_sticky_and_blocks_vnc_and_ssh_before_credentials_or_ne
             streaming: StreamSettings::default(),
             audio: maccanvas::audio::Settings::default(),
             remember: false,
+            require_windows_hello: true,
             window: 0,
             generation: 1,
             audit: scope,

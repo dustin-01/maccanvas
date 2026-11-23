@@ -455,6 +455,7 @@ fn encrypted_apple_peer(
                 ..Default::default()
             },
             remember: false,
+            require_windows_hello: true,
             window: 0,
             generation: 1,
             audit: audit.audit().scope(json!({"test.fixture":"hevc"})),

@@ -17,7 +17,7 @@ One portable viewer. No extra DLLs or subscription.
 - **Sharp scaling:** larger desktops shrink to fit the window. Turn on **Fit view** in **Picture & connection** to enlarge smaller desktops too. Both modes preserve the Mac's aspect ratio.
 - **Visible cursor:** keep your normal Windows pointer and accessibility size.
 - **Multiple Macs.** Keep several desktops connected in one window. Click a Mac’s card to bring it forward, or use the Mac picker beside the app name when the sidebar is collapsed.
-- **Protected logins:** Windows Credential Manager storage; **Windows Hello is mandatory for every saved login**. Saved passwords cannot be displayed.
+- **Protected logins:** Windows Credential Manager stores saved logins. Windows Hello approval is on by default and can be turned off in the sidebar. Saved passwords cannot be displayed.
 - **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
 - **HEVC performance modes:** Apple's H.265 stream at up to 30 or 60 FPS, with encrypted control/video, a custom bitrate ceiling, Windows-selected GPU decoding, and a bundled native fallback.
 - **Mac audio:** optional HEVC-session playback through your Windows output, with local volume and mute controls.
@@ -56,17 +56,21 @@ or bypass Windows application-control policies.
 
 1. On the Mac, enable **System Settings → General → Sharing → Screen Sharing**
    and allow your macOS account.
-2. Select **New connection**. Enter the Mac's name, IP/VPN address, and port `5900`.
+2. Select **Create new connection**. Enter the Mac's name, IP/VPN address, and port `5900`.
 3. Choose **Mac account** and enter its username/password. Select **Connect to Mac**.
-4. To reconnect with Hello, enable **Save login in Credential Manager**.
+4. To reuse your Mac password, enable **Save login in Credential Manager**. To connect without a Windows Hello prompt, uncheck **Require Windows Hello for saved logins** in the sidebar.
    Credentials are saved only after a successful login.
 
 To open another session, choose **Connect** on another Mac’s card or use **New**
 to enter its address. Connected Macs stay online as you switch. The sidebar
-shows live previews of the other desktops. Keyboard, mouse, and Mac audio follow
+shows live previews of the other desktops. When you switch, the incoming desktop
+briefly shows the Mac's saved name. Keyboard, mouse, and Mac audio follow
 the desktop in view. **Disconnect** closes the displayed session and returns
 you to another open Mac. In full screen, hold the pointer at the top edge for
 one second to reveal the traffic graph, Mac picker, and **Exit full screen**.
+Enable **Capture cursor on fullscreen** in the sidebar to keep the pointer on the
+viewer's monitor while controlling a Mac. Exiting full screen or switching to
+another Windows app releases the pointer.
 
 **VNC password** is for the separate password configured in Screen Sharing,
 not the Mac account password; select a lossless VNC mode in **Quality** to use it.
@@ -137,17 +141,14 @@ may benefit from the HEVC30 preset. Run `--video-info` to inspect the installed
 adapters and decoder components; actual stream negotiation can still fall back.
 
 **Apply** reconnects the current Mac when you change the transport, HEVC preset,
-Mac display or HEVC bitrate ceiling. Saved logins require fresh Windows Hello
-approval. Other quality changes apply live. H.264 playback is not supported.
+Mac display or HEVC bitrate ceiling. Other quality changes apply live. H.264 playback is not supported.
 
 An idle HEVC desktop can remain connected at 0 FPS, including when video resumes
 after a long pause. Periodic video-port keepalives preserve the UDP/NAT path even
 when no new pictures are sent. After an established HEVC session suffers a network/control
 interruption or an unrecoverable picture stall, MacCanvas retries continuously,
 waiting 1, 2, 4, 8, 16, then at most 30 seconds between attempts. **Cancel** or
-**Disconnect** stops retries. Saved-login attempts still require Windows Hello;
-declining consent, authentication failures, and security-audit failures stop
-retries rather than repeatedly prompting or bypassing the security gate.
+**Disconnect** stops retries. Retries follow your saved-login preference. Declining a Hello prompt, an authentication failure, or a security-audit failure stops retries.
 
 A bandwidth target paces screen requests; **it is not a guaranteed bitrate cap**.
 Bursts can exceed it. Keyboard and mouse input are not throttled.
@@ -160,7 +161,7 @@ Open the **speaker button** and choose **Enable audio**. The app downloads and
 verifies a small, separately licensed AAC converter from the matching official
 release. Audio works with compatible **HEVC / H.265** sessions; ordinary VNC
 does not carry sound. Enabling or retrying sound reconnects an active HEVC
-session automatically, with fresh Hello approval for saved logins.
+session automatically, using your saved-login preference.
 
 Viewer-only releases reuse the same verified audio converter, so an installed
 component remains available after updating MacCanvas. A new audio download is
@@ -196,7 +197,7 @@ connection, including the same login and host-key verification. Closing a panel
 keeps the established SSH connection open.
 
 Enable **Remote Login** in the Mac's Sharing settings. Verify the SSH fingerprint
-before trusting a new Mac. Saved Mac logins require fresh Windows Hello approval.
+before trusting a new Mac. Saved Mac logins follow your Windows Hello preference.
 
 Send or receive single files without overwriting existing files. Uploads are
 SHA-256 checked by reading them back before the final file is created.
@@ -206,9 +207,9 @@ transfer are not supported. [Setup and compatibility](docs/sharing.md).
 ## Saved-login privacy
 
 Passwords never enter profile files or a saved-password display field.
-Every [saved-login attempt](docs/images/saved-login.png), including SSH, requires a fresh Hello approval.
-If Hello is unavailable or cancelled, the app neither reads nor sends the saved password.
-SSH verifies the host key before requesting Hello.
+By default, each [saved-login attempt](docs/images/saved-login.png), including SSH, prompts for Windows Hello. Turning off **Require Windows Hello for saved logins** lets anyone using your unlocked Windows session connect to any saved Mac.
+When approval is required and Hello is unavailable or cancelled, the app neither reads nor sends the saved password.
+SSH verifies the host key before reading saved credentials.
 You may instead enter credentials manually; this does not unlock the saved login.
 Unsaved credentials stay in zeroizing process memory only while connected, so
 stream-mode changes can reconnect without saving them. Disconnecting clears them.

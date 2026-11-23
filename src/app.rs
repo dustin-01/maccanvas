@@ -1,3 +1,4 @@
+mod cursor_capture;
 mod desktop_events;
 mod desktops;
 mod files_ui;
@@ -43,7 +44,7 @@ use maccanvas::{
     updates::{self, Updater},
 };
 
-use crate::{App, CodecGuide, Machine, TrafficBar};
+use crate::{App, CodecGuide, Machine, SavedMac, TrafficBar};
 
 struct Reconnect {
     profile: Profile,
@@ -123,6 +124,7 @@ impl State {
             "profile.count":self.settings.profiles.len(), "ui.sidebar_open":self.settings.sidebar_open,
             "ui.show_fps":self.settings.show_fps, "input.ctrl_as_command":self.settings.ctrl_as_command,
             "ui.fit_view":self.settings.fit_view,
+            "security.require_windows_hello":self.settings.require_windows_hello,
             "rfb.streaming":self.settings.streaming,
             "audio.playback":self.settings.audio,
         }))
@@ -204,6 +206,18 @@ fn notify(app: &App, error: impl std::fmt::Display) {
 }
 
 fn model(app: &App, state: &State) {
+    let saved_macs = state
+        .settings
+        .profiles_by_recency()
+        .into_iter()
+        .map(|profile| SavedMac {
+            connecting: state.desktop(profile.id).is_some_and(|d| !d.connected),
+            profile_id: profile.id.to_string().into(),
+            name: profile.name.as_str().into(),
+        });
+    if app.get_saved_macs().iter().ne(saved_macs.clone()) {
+        app.set_saved_macs(ModelRc::new(VecModel::from(saved_macs.collect::<Vec<_>>())));
+    }
     let profiles = filtered_profiles(app, state);
     let rows: Vec<_> = profiles
         .iter()
@@ -401,11 +415,22 @@ fn select(app: &App, state: &Rc<RefCell<State>>, id: Option<Uuid>, edit: bool) -
 
 fn preferences(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     let mut state = state.borrow_mut();
+    let previous_hello = state.settings.require_windows_hello;
+    state.settings.require_windows_hello = app.get_require_windows_hello();
+    state.settings.capture_cursor_fullscreen = app.get_capture_cursor_fullscreen();
     state.settings.ctrl_as_command = app.get_ctrl_as_command();
+    let scroll_position = app.get_scroll_speed_position().round() as u8;
+    if scroll_position != state.settings.scroll_speed_position {
+        state.scroll.clear();
+        state.settings.scroll_speed_position = scroll_position;
+    }
     state.settings.sidebar_open = app.get_sidebar_open();
     state.settings.show_fps = app.get_show_fps();
     state.settings.fit_view = app.get_fit_view();
-    state.persist()
+    state.persist().inspect_err(|_| {
+        state.settings.require_windows_hello = previous_hello;
+        app.set_require_windows_hello(previous_hello);
+    })
 }
 
 fn refresh_layout(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
@@ -645,6 +670,7 @@ fn open_desktop(
         streaming,
         audio: state.settings.audio,
         remember,
+        require_windows_hello: state.settings.require_windows_hello,
         window: hwnd,
         generation: desktop.generation,
     };
@@ -1273,10 +1299,13 @@ pub fn run(
     });
     app.set_motion_enabled(theme::motion_enabled()?);
     app.set_glass_enabled(theme::glass_enabled()?);
+    app.set_capture_cursor_fullscreen(settings.capture_cursor_fullscreen);
     app.set_ctrl_as_command(settings.ctrl_as_command);
+    app.set_require_windows_hello(settings.require_windows_hello);
     app.set_sidebar_open(settings.sidebar_open || settings.profiles.is_empty());
     app.set_show_fps(settings.show_fps);
     app.set_fit_view(settings.fit_view);
+    app.set_scroll_speed_position(f32::from(settings.scroll_speed_position));
     app.set_clipboard_shared(settings.clipboard_enabled);
     app.set_audio_muted(settings.audio.muted);
     app.set_audio_volume(f32::from(settings.audio.volume));
@@ -1749,23 +1778,54 @@ pub fn run(
     });
     let weak = app.as_weak();
     let cancel_state = state.clone();
-    app.on_cancel_selected_connection(move || {
+    app.on_disconnect_selected(move || {
+        let id = cancel_state.borrow().editing_id();
         if let Some(app) = weak.upgrade()
-            && let Err(error) = desktops::cancel_selected(&app, &cancel_state)
+            && let Err(error) = desktops::disconnect_machine(&app, &cancel_state, id)
+        {
+            notify(&app, error);
+        }
+    });
+    let weak = app.as_weak();
+    let card_state = state.clone();
+    app.on_disconnect_machine(move |profile_id| {
+        if let Some(app) = weak.upgrade()
+            && let Ok(id) = Uuid::parse_str(profile_id.as_str())
+            && let Err(error) = desktops::disconnect_machine(&app, &card_state, id)
         {
             notify(&app, error);
         }
     });
     let weak = app.as_weak();
     let quick_state = state.clone();
-    app.on_quick_connect(move |index| {
+    let quick_events = events.clone();
+    app.on_quick_connect(move |profile_id| {
         let Some(app) = weak.upgrade() else { return };
-        let id = row_id(&app, index);
-        match id.and_then(|id| select(&app, &quick_state, Some(id), true)) {
-            Ok(()) if app.get_has_saved() && !app.get_selected_busy() => {
-                app.invoke_connect_requested()
+        let result = (|| -> Result<()> {
+            let id = Uuid::parse_str(profile_id.as_str())
+                .map_err(|_| Error::Configuration("Invalid Mac identifier".into()))?;
+            let saved = quick_state
+                .borrow()
+                .settings
+                .profiles
+                .iter()
+                .find(|profile| profile.id == id && profile.has_saved_credentials)
+                .cloned();
+            if let Some(profile) = saved {
+                start_connection(
+                    &app,
+                    &mut quick_state.borrow_mut(),
+                    profile,
+                    CredentialSource::Saved,
+                    false,
+                    &quick_events,
+                )
+            } else {
+                select(&app, &quick_state, Some(id), true)
             }
-            Ok(()) => (),
+        })();
+        match result {
+            Ok(()) => app.set_error_text("".into()),
             Err(error) => notify(&app, error),
         }
     });
@@ -1855,6 +1915,7 @@ pub fn run(
             })
             .delete(id)?;
             state.settings.profiles.remove(index);
+            state.settings.recent_macs.retain(|recent| *recent != id);
             state.selected = None;
             state
                 .audit
@@ -2007,7 +2068,12 @@ pub fn run(
             } else {
                 state.scroll_scale
             };
-            state.scroll.add(event.delta_x, event.delta_y, scale)?;
+            let multiplier = app.get_scroll_multiplier();
+            state.scroll.add(
+                event.delta_x * multiplier,
+                event.delta_y * multiplier,
+                scale,
+            )?;
             state.flush_scroll()
         })();
         if let Err(error) = result {
@@ -2190,11 +2256,15 @@ pub fn run(
     let timer = slint::Timer::default();
     let weak = app.as_weak();
     let timer_state = state.clone();
+    let cursor_capture = cursor_capture::CursorCapture::default();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(16),
         move || {
             let Some(app) = weak.upgrade() else { return };
+            if let Err(error) = cursor_capture.sync(&app) {
+                notify(&app, error);
+            }
             if let Err(error) = tick_updates(&app, &timer_state) {
                 app.set_update_status(error.to_string().into());
                 app.set_update_banner(true);
@@ -2317,6 +2387,7 @@ pub fn run(
     );
     app.run()
         .map_err(|error| Error::Display(error.to_string()))?;
+    drop(timer);
     let save_audio = state.borrow_mut().audio_persist_at.take().is_some();
     if save_audio {
         state.borrow().persist()?;

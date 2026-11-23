@@ -299,6 +299,7 @@ pub struct Request {
     pub port: u16,
     pub credentials: CredentialSource,
     pub pinned: Option<SshHostKey>,
+    pub require_windows_hello: bool,
     pub window: isize,
     pub audit: Scope,
 }
@@ -599,6 +600,7 @@ async fn run(
     let credentials = credentials::resolve(
         request.profile.id,
         request.credentials,
+        request.require_windows_hello,
         &AuditedConsent {
             scope: &request.audit,
             window: request.window,

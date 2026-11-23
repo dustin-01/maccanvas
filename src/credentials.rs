@@ -47,12 +47,15 @@ pub enum CredentialSource {
 pub fn resolve(
     profile: Uuid,
     source: CredentialSource,
+    require_windows_hello: bool,
     consent: &impl ConsentVerifier,
     store: &impl CredentialStore,
 ) -> Result<Credentials> {
     match source {
         CredentialSource::Saved => {
-            consent.verify()?;
+            if require_windows_hello {
+                consent.verify()?;
+            }
             store.load(profile)
         }
 
@@ -336,11 +339,26 @@ mod tests {
         resolve(
             Uuid::new_v4(),
             CredentialSource::Saved,
+            true,
             &Consent(&calls, true),
             &Store(&calls),
         )
         .unwrap();
         assert_eq!(*calls.borrow(), ["hello", "read"]);
+    }
+
+    #[test]
+    fn saved_login_without_hello_reads_the_vault_directly() {
+        let calls = RefCell::new(Vec::new());
+        resolve(
+            Uuid::new_v4(),
+            CredentialSource::Saved,
+            false,
+            &Consent(&calls, false),
+            &Store(&calls),
+        )
+        .unwrap();
+        assert_eq!(*calls.borrow(), ["read"]);
     }
 
     #[test]
@@ -350,6 +368,7 @@ mod tests {
             resolve(
                 Uuid::new_v4(),
                 CredentialSource::Saved,
+                true,
                 &Consent(&calls, false),
                 &Store(&calls)
             )
@@ -364,6 +383,7 @@ mod tests {
         resolve(
             Uuid::new_v4(),
             CredentialSource::Manual(Credentials::new("fixture".into(), "fixture".into())),
+            true,
             &Consent(&calls, false),
             &Store(&calls),
         )
@@ -378,6 +398,7 @@ mod tests {
         resolve(
             profile,
             CredentialSource::Saved,
+            true,
             &Consent(&calls, true),
             &Store(&calls),
         )
@@ -386,6 +407,7 @@ mod tests {
             resolve(
                 profile,
                 CredentialSource::Saved,
+                true,
                 &Consent(&calls, false),
                 &Store(&calls)
             )
@@ -402,11 +424,21 @@ mod tests {
         resolve(
             profile,
             source.clone(),
+            true,
             &Consent(&calls, true),
             &Store(&calls),
         )
         .unwrap();
-        assert!(resolve(profile, source, &Consent(&calls, false), &Store(&calls)).is_err());
+        assert!(
+            resolve(
+                profile,
+                source,
+                true,
+                &Consent(&calls, false),
+                &Store(&calls)
+            )
+            .is_err()
+        );
         assert_eq!(*calls.borrow(), ["hello", "read", "hello"]);
     }
 
@@ -418,6 +450,7 @@ mod tests {
             let credentials = resolve(
                 Uuid::new_v4(),
                 reconnect,
+                true,
                 &Consent(&calls, false),
                 &Store(&calls),
             )

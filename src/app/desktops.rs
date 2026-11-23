@@ -319,6 +319,9 @@ pub fn activate(app: &App, state: &Rc<RefCell<State>>, id: Uuid) -> Result<()> {
         stream_summary(app, state.active.streaming);
         guide(app, state.active.source_size);
         show(app, &state);
+        if state.active.connected && state.settings.record_mac_use(id) {
+            state.persist()?;
+        }
         model(app, &state);
     }
     refresh_layout(app, state)?;
@@ -352,17 +355,16 @@ pub fn restore_survivor(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     Ok(())
 }
 
-pub fn cancel_selected(app: &App, shared: &Rc<RefCell<State>>) -> Result<()> {
+pub fn disconnect_machine(app: &App, shared: &Rc<RefCell<State>>, id: Uuid) -> Result<()> {
     let mut state = shared.borrow_mut();
-    let id = state.editing_id();
-    if state.active.id() == Some(id) && !state.active.connected {
+    if state.active.id() == Some(id) {
         drop(state);
         return disconnect(app, shared);
     }
     if let Some(i) = state
         .background
         .iter()
-        .position(|d| d.id() == Some(id) && !d.connected)
+        .position(|d| d.id() == Some(id))
     {
         let mut desktop = state.background.remove(i);
         let closed = if let Some(session) = desktop.session.take() {

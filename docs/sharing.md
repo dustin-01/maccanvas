@@ -52,7 +52,7 @@ Before any password is read from the vault or sent over SSH:
 2. An existing pinned key must match. A changed key is blocked, without a bypass.
 3. A first-use key requires explicit confirmation. Compare the displayed
    SHA-256 fingerprint on the Mac through a trusted channel.
-4. A saved login requires a fresh Windows Hello approval.
+4. If **Require Windows Hello for saved logins** is enabled in the sidebar, approve the Windows Hello prompt.
 
 For an Ed25519 host key, run this in the Mac's Terminal:
 
@@ -130,7 +130,7 @@ command, argument, temporary helper file, or audit record. This preserves litera
 RTF/PostScript-looking text instead of treating it as rich clipboard content.
 No general-purpose remote-command interface is exposed.
 
-Saved passwords remain protected by the same mandatory Hello gate used for VNC.
+SSH and VNC use the same Windows Hello preference for saved passwords.
 Clipboard audit events contain direction, encoding, byte counts, and outcomes.
 Helper failures also report an allowlisted operation stage, error category and
 numeric code, and whether SSH matches a logged-in console desktop account.

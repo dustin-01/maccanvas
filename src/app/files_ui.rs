@@ -383,7 +383,15 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
             };
             let scope = state.audit.child(json!({"profile.id":profile.id,"server.address":profile.host,"server.port":port,"network.protocol.name":"ssh"}));
             let pinned = state.settings.ssh_host_keys.iter().find(|key| key.endpoint(&profile.host,port)).cloned();
-            let client = Client::start(Request { profile,port,credentials,pinned,window:window_handle(&app)?,audit:scope.clone() })?;
+            let client = Client::start(Request {
+                profile,
+                port,
+                credentials,
+                pinned,
+                require_windows_hello: state.settings.require_windows_hello,
+                window: window_handle(&app)?,
+                audit: scope.clone(),
+            })?;
             state.active.files.scope = Some(scope); state.active.files.client = Some(client);
             app.set_files_connecting(true); app.set_files_error("".into()); app.set_files_status("Verifying the Mac's SSH identity before using credentials...".into());
             Ok(())
