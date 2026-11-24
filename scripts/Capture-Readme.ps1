@@ -116,7 +116,7 @@ try {
         throw 'Mandatory Windows Hello protection is not visible.'
     }
     if ($PreviewTheme -eq 'auto') { Capture-OwnedWindow (Join-Path $images 'saved-login.png') }
-    $allCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Show saved Macs')
+    $allCondition = [Windows.Automation.PropertyCondition]::new([Windows.Automation.AutomationElement]::NameProperty, 'Back to all macs')
     $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $allCondition).
         GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     Start-Sleep -Milliseconds 150

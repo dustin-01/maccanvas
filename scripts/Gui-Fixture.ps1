@@ -381,7 +381,7 @@ public static class MacCanvasOwnedDialogInput {
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     }
     'show-macs' {
-        (Find-FixtureElement 'Show saved Macs' ([Windows.Automation.ControlType]::Button)).
+        (Find-FixtureElement 'Back to all macs' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     }
     'new' {
@@ -485,11 +485,11 @@ public static class MacCanvasOwnedDialogInput {
         $name = (Find-FixtureElement 'Machine name' ([Windows.Automation.ControlType]::Edit)).
             GetCurrentPattern([Windows.Automation.ValuePattern]::Pattern).Current.Value
         if ($name -cne $MachineName) { throw "Details opened the wrong Mac: $name" }
-        (Find-FixtureElement 'Show saved Macs' ([Windows.Automation.ControlType]::Button)).
+        (Find-FixtureElement 'Back to all macs' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     }
     'cancel-pending-card' {
-        (Find-FixtureElement 'Show saved Macs' ([Windows.Automation.ControlType]::Button)).
+        (Find-FixtureElement 'Back to all macs' ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
         (Find-FixtureElement "Select $MachineName" ([Windows.Automation.ControlType]::Button)).
             GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
@@ -523,17 +523,10 @@ public static class MacCanvasOwnedDialogInput {
             }
         }
         Move-Pointer ([int]($canvas.Y + $canvas.Height / 2))
+        Start-Sleep -Milliseconds 1300
+        Assert-Hidden
+        Move-Pointer $top
         Start-Sleep -Milliseconds 350
-        Assert-Hidden
-        Move-Pointer $top
-        Start-Sleep -Milliseconds 450
-        Assert-Hidden
-        Move-Pointer ([int]($canvas.Y + $canvas.Height / 2))
-        Start-Sleep -Milliseconds 850
-        Assert-Hidden
-        Move-Pointer $top
-        Start-Sleep -Milliseconds 500
-        Assert-Hidden
         $exitButton = Find-FixtureElement 'Exit full screen' ([Windows.Automation.ControlType]::Button)
         Start-Sleep -Milliseconds 220
         $exit = $exitButton.Current.BoundingRectangle

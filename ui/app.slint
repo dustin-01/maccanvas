@@ -13,6 +13,19 @@ export struct SavedMac { profile-id: string, name: string, connecting: bool }
 export struct TrafficBar { download: float, upload: float }
 export struct CodecGuide { name: string, detail: string, estimate: string }
 
+component PopupTransition inherits Rectangle {
+    in property <bool> open;
+    out property <float> progress: open ? 1 : 0;
+    animate progress { duration: GlassTheme.motion ? 180ms : 0ms; easing: ease-out; }
+    visible: open || progress > 0;
+    opacity: progress;
+    @children
+}
+
+component DetailsButton inherits Button {
+    height: 36px;
+}
+
 component Caption inherits Text {
     color: Palette.foreground;
     font-size: 12px;
@@ -139,9 +152,12 @@ export component App inherits Window {
     private property <bool> fullscreen-menu-open;
     private property <bool> controls-shown;
     private property <length> fullscreen-controls-y: root.controls-shown ? 0px : -64px;
-    animate fullscreen-controls-y { duration: root.motion-enabled && root.immersive ? 180ms : 0ms; easing: linear; }
+    animate fullscreen-controls-y { duration: root.motion-enabled && root.immersive ? 180ms : 0ms; easing: ease-out; }
     private property <bool> keep-controls: root.fullscreen-menu-open || (root.pointer-y >= 0 && root.pointer-y < 64);
-    changed keep-controls => { if !root.keep-controls { root.controls-shown = false; } }
+    Timer {
+        interval: 1000ms; running: root.immersive && root.controls-shown && !root.keep-controls;
+        triggered => { root.controls-shown = false; }
+    }
     changed immersive => {
         root.controls-shown = false;
         root.fullscreen-menu-open = false;
@@ -152,7 +168,7 @@ export component App inherits Window {
         triggered => { root.pointer-y = root.fullscreen-pointer-y(); }
     }
     Timer {
-        interval: 1000ms;
+        interval: 200ms;
         running: root.immersive && !root.controls-shown && root.pointer-y >= 0 && root.pointer-y < 12;
         triggered => { root.controls-shown = true; }
     }
@@ -198,7 +214,8 @@ export component App inherits Window {
     in property <string> files-error;
     in property <string> files-progress-label;
     in property <float> files-progress;
-    out property <bool> modal-open: quality-open || help-open || about-open || clipboard-open || files-open || audio-open || update-installing;
+    in-out property <bool> settings-open: false;
+    out property <bool> modal-open: settings-open || quality-open || help-open || about-open || clipboard-open || files-open || audio-open || update-installing;
     out property <bool> canvas-focused: remote-focus.has-focus;
     in property <bool> update-checking: false;
     in property <bool> update-available: false;
@@ -367,8 +384,8 @@ export component App inherits Window {
     property <color> accent: GlassTheme.accent;
     property <color> selection: root.dark-theme ? #0a84ff1f : #007aff0c;
     private property <bool> narrow-window: false;
-    private property <bool> compact-toolbar: root.narrow-window && root.connected-macs.length > 0;
-    changed width => { root.narrow-window = root.width < 1100px; }
+    private property <bool> compact-toolbar: root.narrow-window;
+    changed width => { root.narrow-window = root.width < 1200px; }
     FocusScope {
         enabled: !root.modal-open;
     VerticalLayout {
@@ -399,6 +416,7 @@ export component App inherits Window {
                     pick-by-name(value) => { root.switch-mac-by-name(value); }
                 }
                 Rectangle { horizontal-stretch: 1; background: transparent; }
+                Button { text: root.compact-toolbar ? "" : "Settings"; icon: @image-url("../assets/settings.svg"); accessible-label: "Settings"; clicked => { root.settings-open = true; root.release-input(); } }
                 Button { text: root.compact-toolbar ? "" : "Quality"; icon: @image-url("../assets/tune.svg"); accessible-label: "Stream quality"; clicked => { root.quality-open = true; root.release-input(); } }
                 Button { icon: @image-url("../assets/audio.svg"); accessible-label: "Audio playback"; quiet: root.audio-muted; clicked => { root.audio-open = true; root.release-input(); } }
                 Button {
@@ -436,20 +454,13 @@ export component App inherits Window {
                     opacity: min(1, sidebar.width / 240px);
                     visible: sidebar.width > 1px;
                     ScrollView {
-                        VerticalLayout {
+                        horizontal-scrollbar-policy: always-off;
+                        content-width: self.visible-width;
+                        content-height: sidebar-content.preferred-height;
+                        sidebar-content := VerticalLayout {
+                            alignment: start;
                             padding: 18px; spacing: 10px;
-                            HorizontalLayout {
-                                Caption { text: root.editor-open ? (root.selected >= 0 ? "MAC DETAILS" : "NEW CONNECTION") : "YOUR MACS"; color: root.muted; }
-                                Button {
-                                    text: root.editor-open ? "All Macs" : "New";
-                                    accessible-label: root.editor-open ? "Show saved Macs" : "New connection";
-                                    clicked => {
-                                        root.confirm-delete = false;
-                                        if root.editor-open { root.editor-open = false; }
-                                        else { root.new-machine(); }
-                                    }
-                                }
-                            }
+                            Caption { text: root.editor-open ? (root.selected >= 0 ? "MAC DETAILS" : "NEW CONNECTION") : "YOUR MACS"; color: root.muted; }
                             if !root.editor-open : VerticalLayout {
                                 spacing: 10px;
                                 LineEdit { accessible-label: "Search saved Macs"; height: 34px; text <=> root.machine-filter; placeholder-text: "Search by name or address"; }
@@ -505,7 +516,7 @@ export component App inherits Window {
                                 }
                             }
                             if root.editor-open : VerticalLayout {
-                                spacing: 8px;
+                                alignment: start; spacing: 8px;
                                 if root.selected-busy && !root.selected-connecting : Text { text: "Disconnect this Mac to change its details."; color: root.muted; wrap: word-wrap; }
                                 Caption { text: "Name"; }
                                 LineEdit { accessible-label: "Machine name"; text <=> root.machine-name; placeholder-text: "Mac mini"; enabled: !root.selected-busy; }
@@ -526,7 +537,7 @@ export component App inherits Window {
                                         padding: 12px; spacing: 6px;
                                         Caption { text: root.require-windows-hello ? "Saved login is locked" : "Saved login"; color: root.accent; }
                                         Text { text: root.require-windows-hello ? "Approve Windows Hello to use this saved login." : "Connect using the password in Windows Credential Manager."; color: root.ink; font-size: 12px; wrap: word-wrap; }
-                                        Button {
+                                        DetailsButton {
                                             text: "Enter different credentials";
                                             enabled: !root.selected-busy;
                                             clicked => { root.use-saved = false; }
@@ -546,67 +557,40 @@ export component App inherits Window {
                                         text: root.has-saved ? "Replace saved login after connecting" : "Save login in Credential Manager";
                                         checked <=> root.remember-password; enabled: !root.selected-busy;
                                     }
-                                    if root.has-saved : Button {
+                                    if root.has-saved : DetailsButton {
                                         text: "Use saved login";
                                         enabled: !root.selected-busy;
                                         clicked => { root.use-saved = true; }
                                     }
                                 }
-                                Button {
+                                DetailsButton {
                                     text: root.selected-connecting ? "Connecting…" : (root.selected-busy ? "Disconnect" : (root.use-saved && root.require-windows-hello ? "Unlock & connect" : "Connect to Mac"));
                                     accessible-label: root.selected-busy ? self.text : "Connect to Mac"; primary: !root.selected-busy;
                                     destructive: root.selected-busy && !root.selected-connecting;
                                     enabled: !root.selected-connecting && (root.selected-busy || (root.host != "" && (root.use-saved || root.password != "")));
                                     clicked => { if root.selected-busy { root.disconnect-selected(); } else { root.connect-requested(); } }
                                 }
-                                if root.selected-connecting : Button {
+                                if root.selected-connecting : DetailsButton {
                                     text: "Cancel"; accessible-label: "Cancel connection to selected Mac";
                                     clicked => { root.disconnect-selected(); }
                                 }
                                 HorizontalLayout {
-                                    Button { text: "Save details"; accessible-label: "Save machine"; enabled: !root.selected-busy; clicked => { root.save-machine(); } }
-                                    Button { text: "Remove"; enabled: root.selected >= 0 && !root.selected-busy; clicked => { root.confirm-delete = !root.confirm-delete; } }
+                                    DetailsButton { text: "Save details"; accessible-label: "Save machine"; enabled: !root.selected-busy; clicked => { root.save-machine(); } }
+                                    DetailsButton { text: "Remove"; enabled: root.selected >= 0 && !root.selected-busy; clicked => { root.confirm-delete = !root.confirm-delete; } }
+                                }
+                                DetailsButton {
+                                    text: "Back to all macs"; accessible-label: "Back to all macs";
+                                    clicked => { root.confirm-delete = false; root.editor-open = false; }
                                 }
                                 if root.confirm-delete : VerticalLayout {
                                     Text { text: "Remove this Mac and its saved login?"; color: root.ink; wrap: word-wrap; }
                                     HorizontalLayout {
-                                        Button { text: "Keep Mac"; clicked => { root.confirm-delete = false; } }
-                                        Button { text: "Remove Mac"; clicked => { root.delete-machine(); root.confirm-delete = false; } }
+                                        DetailsButton { text: "Keep Mac"; clicked => { root.confirm-delete = false; } }
+                                        DetailsButton { text: "Remove Mac"; clicked => { root.delete-machine(); root.confirm-delete = false; } }
                                     }
                                 }
                             }
-                            Rectangle { height: 1px; background: root.outline; }
-                            CheckBox { text: "Ctrl shortcuts act as Command"; checked <=> root.ctrl-as-command; toggled => { root.save-preferences(); } }
-                            CheckBox { text: "Capture cursor on fullscreen"; checked <=> root.capture-cursor-fullscreen; toggled => { root.save-preferences(); } }
-                            VerticalLayout {
-                                spacing: 2px;
-                                Caption { text: "Mouse scroll speed  " + (round(root.scroll-multiplier * 100) / 100) + "×"; }
-                                Slider {
-                                    accessible-label: "Mouse scroll speed, " + (round(root.scroll-multiplier * 100) / 100) + " times";
-                                    value <=> root.scroll-speed-position;
-                                    changed => { if !self.dragging { root.save-preferences(); } }
-                                    changed dragging => { if !self.dragging { root.save-preferences(); } }
-                                }
-                                HorizontalLayout {
-                                    Text { text: "0×"; width: 33.33%; color: root.muted; font-size: 11px; }
-                                    Text { text: "1×"; horizontal-stretch: 1; horizontal-alignment: center; color: root.muted; font-size: 11px; }
-                                    Text { text: "10×"; width: 33.33%; horizontal-alignment: right; color: root.muted; font-size: 11px; }
-                                }
-                            }
-                            CheckBox { text: "Require Windows Hello for saved logins"; checked <=> root.require-windows-hello; toggled => { root.save-preferences(); } }
-                            Text { text: "With Hello off, anyone using your unlocked Windows session can connect to your saved Macs."; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                            Text { text: "Use a VPN for remote access. Standard Mac VNC traffic is not encrypted."; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                            Rectangle { height: 1px; background: root.outline; }
-                            HorizontalLayout {
-                                Text { text: "MacCanvas " + root.app-version; color: root.muted; font-size: 11px; vertical-alignment: center; }
-                                Button {
-                                    text: root.update-checking ? "Checking..." : (root.update-available ? "Update" : "Check updates");
-                                    accessible-label: "Check for updates";
-                                    enabled: !root.update-checking && !root.update-installing && !root.update-restart-required;
-                                    clicked => { root.check-updates(); }
-                                }
-                            }
-                            Text { accessible-label: "Update status: " + root.update-status; text: root.update-status; color: root.muted; font-size: 11px; wrap: word-wrap; }
+
                         }
                     }
                 }
@@ -785,206 +769,293 @@ export component App inherits Window {
         }
     }
     }
-    if root.quality-open || root.help-open : Rectangle {
-        background: root.dark-theme ? #00000099 : #00000033;
-        TouchArea { clicked => { root.quality-open = false; root.help-open = false; } }
-        GlassPanel {
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            width: min(620px, parent.width - 48px); height: min(700px, parent.height - 48px);
-            radius: 24px; raised: true;
+    settings-popup := PopupTransition {
+        open: root.settings-open;
+        if settings-popup.visible : Rectangle {
+            background: root.dark-theme ? #00000099 : #00000033;
+            TouchArea { clicked => { root.settings-open = false; } }
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => { if event.text == Key.Escape { root.settings-open = false; return accept; } return reject; }
+                GlassPanel {
+                    x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + (1 - settings-popup.progress) * 8px;
+                    width: min(480px, parent.width - 48px); height: min(490px, parent.height - 48px);
+                    radius: 24px; raised: true;
+                    TouchArea { }
+                    VerticalLayout {
+                        padding: 24px; spacing: 14px;
+                        HorizontalLayout {
+                            Text { text: "Settings"; color: root.ink; font-size: 22px; font-weight: 600; }
+                            Button { text: "Done"; clicked => { root.settings-open = false; } }
+                        }
+                        ScrollView {
+                            horizontal-scrollbar-policy: always-off;
+                            content-width: self.visible-width;
+                            VerticalLayout {
+                                spacing: 10px; padding-right: 12px;
+                                CheckBox { text: "Ctrl shortcuts act as Command"; checked <=> root.ctrl-as-command; toggled => { root.save-preferences(); } }
+                                CheckBox { text: "Capture cursor on fullscreen"; checked <=> root.capture-cursor-fullscreen; toggled => { root.save-preferences(); } }
+                                VerticalLayout {
+                                    spacing: 2px;
+                                    Caption { text: "Mouse scroll speed  " + (round(root.scroll-multiplier * 100) / 100) + "×"; }
+                                    Slider {
+                                        accessible-label: "Mouse scroll speed, " + (round(root.scroll-multiplier * 100) / 100) + " times";
+                                        value <=> root.scroll-speed-position;
+                                        changed => { if !self.dragging { root.save-preferences(); } }
+                                        changed dragging => { if !self.dragging { root.save-preferences(); } }
+                                    }
+                                    HorizontalLayout {
+                                        Text { text: "0×"; width: 33.33%; color: root.muted; font-size: 11px; }
+                                        Text { text: "1×"; horizontal-stretch: 1; horizontal-alignment: center; color: root.muted; font-size: 11px; }
+                                        Text { text: "10×"; width: 33.33%; horizontal-alignment: right; color: root.muted; font-size: 11px; }
+                                    }
+                                }
+                                CheckBox { text: "Require Windows Hello for saved logins"; checked <=> root.require-windows-hello; toggled => { root.save-preferences(); } }
+                                Text { text: "With Hello off, anyone using your unlocked Windows session can connect to your saved Macs."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                                Text { text: "Use a VPN for remote access. Standard Mac VNC traffic is not encrypted."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                                Rectangle { height: 1px; background: root.outline; }
+                                HorizontalLayout {
+                                    Text { text: "MacCanvas " + root.app-version; color: root.muted; font-size: 11px; vertical-alignment: center; }
+                                    Button {
+                                        text: root.update-checking ? "Checking..." : (root.update-available ? "Update" : "Check updates");
+                                        accessible-label: "Check for updates";
+                                        enabled: !root.update-checking && !root.update-installing && !root.update-restart-required;
+                                        clicked => { root.settings-open = false; root.check-updates(); }
+                                    }
+                                }
+                                Text { accessible-label: "Update status: " + root.update-status; text: root.update-status; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    quality-popup := PopupTransition {
+        open: root.quality-open || root.help-open;
+        if quality-popup.visible : Rectangle {
+            background: root.dark-theme ? #00000099 : #00000033;
+            TouchArea { clicked => { root.quality-open = false; root.help-open = false; } }
+            GlassPanel {
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + (1 - quality-popup.progress) * 8px;
+                width: min(620px, parent.width - 48px); height: min(700px, parent.height - 48px);
+                radius: 24px; raised: true;
+                TouchArea { }
+                VerticalLayout {
+                    padding: 24px; spacing: 14px;
+                    HorizontalLayout {
+                        Text { text: root.help-open ? "Compression, explained" : "Picture & connection"; color: root.ink; font-size: 22px; font-weight: 600; }
+                        Button { text: "Close"; clicked => { root.help-open = false; root.quality-open = false; } }
+                    }
+                    if root.error-text != "" : Text { text: root.error-text; color: root.dark-theme ? #ff6961 : #b42318; wrap: word-wrap; font-size: 12px; }
+                    if !root.help-open : ScrollView {
+                        horizontal-scrollbar-policy: always-off;
+                        content-width: self.visible-width;
+                        content-height: quality-content.preferred-height;
+                        quality-content := VerticalLayout {
+                            spacing: 12px; padding-left: 4px; padding-right: 16px;
+                            Text { text: "Default: HEVC / H.265 at up to 60 FPS, with adaptive bitrate."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                            Caption { text: "Streaming mode"; }
+                            ComboBox {
+                                accessible-label: "Streaming mode";
+                                accessible-action-set-value(value) => { self.current-value = value; }
+                                height: 36px;
+                                model: ["HEVC / H.265 - 60 FPS (default)", "HEVC / H.265 - 30 FPS", "Auto (lossless VNC)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "Raw (uncompressed)", "RRE (legacy)", "CoRRE (legacy)"];
+                                current-index <=> root.encoding-index;
+                            }
+                            Text { text: root.encoding-description; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                            Button { text: "Compare methods & bandwidth estimates"; clicked => { root.help-open = true; } }
+                            if root.encoding-index >= 2 : HorizontalLayout {
+                                Caption { text: "Compression effort: " + round(root.compression-level); }
+                                Slider { accessible-label: "Compression effort"; minimum: 0; maximum: 9; step: 1; value <=> root.compression-level; enabled: root.encoding-index <= 5 || root.encoding-index == 7; }
+                            }
+                            if root.encoding-index >= 2 : Text { text: "0 = less CPU, potentially more traffic. 9 = more CPU, potentially fewer bytes. This is a server hint, not a bitrate."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                            if root.encoding-index == 5 : HorizontalLayout {
+                                Caption { text: "JPEG quality: " + round(root.jpeg-quality); }
+                                Slider { accessible-label: "JPEG quality"; minimum: 0; maximum: 9; step: 1; value <=> root.jpeg-quality; }
+                            }
+                            if root.encoding-index >= 2 : CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
+                            if root.encoding-index < 2 : CheckBox { text: "Use a manual HEVC bitrate ceiling"; checked <=> root.manual-hevc-bitrate; }
+                            if root.manual-hevc-bitrate && root.encoding-index < 2 : HorizontalLayout {
+                                Caption { text: "HEVC bitrate (Mbps)"; }
+                                LineEdit { accessible-label: "HEVC bitrate Mbps"; text <=> root.hevc-mbps; input-type: InputType.decimal; }
+                            }
+                            if root.manual-bandwidth && root.encoding-index >= 2 : HorizontalLayout {
+                                Caption { text: "Target (Mbps)"; }
+                                LineEdit { accessible-label: "Bandwidth target Mbps"; text <=> root.target-mbps; input-type: InputType.decimal; }
+                            }
+                            Text { text: root.encoding-index < 2 ? "Adaptive bitrate is the default. A manual ceiling requests your chosen Mbps from the Mac; static screens and encoder limits can lower the actual rate, and bursts may exceed it. Compression, JPEG quality and the VNC bandwidth target do not apply. Apply reconnects when changing transports, HEVC presets or the bitrate ceiling." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                            HorizontalLayout {
+                                Caption { text: "Frame rate limit"; }
+                                LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
+                            }
+                            if root.encoding-index < 2 : VerticalLayout {
+                                spacing: 6px;
+                                Caption { text: "Mac display"; }
+                                ComboBox {
+                                    accessible-label: "Mac display";
+                                    accessible-action-set-value(value) => { self.current-value = value; }
+                                    model: root.mac-display-choices;
+                                    current-index <=> root.mac-display-index;
+                                }
+                                Text { text: "Choose a virtual display for more resolutions. Apply reconnects the session. The Mac’s physical screen may go blank until you disconnect."; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                            }
+                            CheckBox { text: "Fit view"; checked <=> root.fit-view; toggled => { root.save-preferences(); } }
+                            Text { text: "Enlarge smaller desktops to fit the window while keeping their proportions."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                            CheckBox { text: "Show live FPS counter"; checked <=> root.show-fps; toggled => { root.save-preferences(); } }
+                            Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/audio SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                        }
+                    }
+                    if root.help-open : ScrollView {
+                        horizontal-scrollbar-policy: always-off;
+                        content-width: self.visible-width;
+                        content-height: guide-content.preferred-height;
+                        guide-content := VerticalLayout {
+                            spacing: 16px; padding-right: 16px;
+                            Text { text: root.estimate-context; color: root.muted; font-size: 12px; wrap: word-wrap; }
+                            for codec in root.codec-guide : VerticalLayout {
+                                spacing: 6px;
+                                Caption { text: codec.name; color: root.accent; }
+                                Text { text: codec.detail; color: root.ink; font-size: 12px; wrap: word-wrap; }
+                                Text { text: codec.estimate; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                                Rectangle { height: 1px; background: root.outline; }
+                            }
+                            Text {
+                                text: "Standard VNC offers CopyRect and a Raw fallback; the Mac may ignore compression/JPEG hints. HEVC uses Apple's separate High Performance transport with encrypted control, SRTP video and optional audio. Video decoding is bundled; audio uses a separate converter. Mac account login and UDP on the VNC port and the next port are required. H.264 playback is not supported.";
+                                color: root.muted; font-size: 12px; wrap: word-wrap;
+                            }
+                        }
+                    }
+                    HorizontalLayout {
+                        Button { text: root.help-open ? "Back to quality" : "Restore defaults"; clicked => { if root.help-open { root.help-open = false; } else { root.reset-streaming(); } } }
+                        Rectangle { background: transparent; horizontal-stretch: 1; }
+                        if !root.help-open : Button { text: "Apply"; primary: true; enabled: !root.connecting && !root.update-installing && root.audit-error == ""; clicked => { root.apply-streaming(); } }
+                    }
+                }
+            }
+        }
+    }
+    audio-popup := PopupTransition {
+        open: root.audio-open;
+        if audio-popup.visible : AudioOverlay {
+            reveal: audio-popup.progress;
+            supported: root.hevc-active; connected: root.connected; missing: root.audio-codec-missing;
+            installing: root.audio-installing; status: root.audio-status;
+            muted <=> root.audio-muted; volume <=> root.audio-volume;
+            changed => { root.audio-changed(); }
+            install => { root.audio-install(); }
+            retry => { root.audio-retry(); }
+            close => { root.audio-open = false; if root.connected { root.focus-canvas(); } }
+        }
+    }
+    about-popup := PopupTransition {
+        open: root.about-open;
+        if about-popup.visible : AboutOverlay {
+            reveal: about-popup.progress;
+            version: root.app-version; build-date: root.build-date; revision: root.build-revision;
+            target: root.build-target; compiler: root.build-compiler; author: root.author-name; log-path: root.log-path;
+            close => { root.about-open = false; if root.connected { root.focus-canvas(); } }
+            open-link(index) => { root.about-link(index); }
+            open-logs => { root.open-logs(); }
+        }
+    }
+
+    clipboard-popup := PopupTransition {
+        open: root.clipboard-open;
+        if clipboard-popup.visible : ClipboardOverlay {
+            reveal: clipboard-popup.progress;
+            shared <=> root.clipboard-shared; mode: root.clipboard-mode; vnc-available: !root.hevc-active;
+            host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
+            has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
+            connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
+            fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
+            status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;
+            changed => { root.clipboard-changed(); }
+            close => { root.close-clipboard(); }
+            paste-text => { root.paste-windows-text(); }
+            connect => { root.files-connect(); }
+            disconnect => { root.files-disconnect(); }
+            approve(accepted) => { root.files-approve(accepted); }
+            cancel => { root.files-cancel(); }
+            copy-text => { root.files-copy-text(); }
+            send-text => { root.files-send-text(); }
+        }
+    }
+
+    files-popup := PopupTransition {
+        open: root.files-open;
+        if files-popup.visible : FilesOverlay {
+            reveal: files-popup.progress;
+            host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
+            has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
+            connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
+            directory-ready: root.files-directory-ready;
+            fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
+            path <=> root.files-path; upload-name <=> root.files-upload-name; entries: root.file-entries;
+            status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;
+            close => { root.files-close(); }
+            connect => { root.files-connect(); }
+            disconnect => { root.files-disconnect(); }
+            approve(accepted) => { root.files-approve(accepted); }
+            browse => { root.files-browse(); }
+            up => { root.files-up(); }
+            entry(index) => { root.files-entry(index); }
+            upload => { root.files-upload(); }
+            cancel => { root.files-cancel(); }
+        }
+    }
+
+    banner-popup := PopupTransition {
+        open: root.update-banner && !root.update-installing && !root.modal-open;
+        if banner-popup.visible : GlassPanel {
+            x: max(16px, root.width - self.width - 20px);
+            y: root.immersive ? 60px : 88px;
+            width: min(390px, root.width - 32px); height: 166px; radius: 18px; raised: true;
+            accessible-role: groupbox; accessible-label: "MacCanvas update notification";
             TouchArea { }
             VerticalLayout {
-                padding: 24px; spacing: 14px;
-                HorizontalLayout {
-                    Text { text: root.help-open ? "Compression, explained" : "Picture & connection"; color: root.ink; font-size: 22px; font-weight: 600; }
-                    Button { text: "Close"; clicked => { root.help-open = false; root.quality-open = false; } }
-                }
-                if root.error-text != "" : Text { text: root.error-text; color: root.dark-theme ? #ff6961 : #b42318; wrap: word-wrap; font-size: 12px; }
-                if !root.help-open : ScrollView {
-                    horizontal-scrollbar-policy: always-off;
-                    content-width: self.visible-width;
-                    content-height: quality-content.preferred-height;
-                    quality-content := VerticalLayout {
-                        spacing: 12px; padding-left: 4px; padding-right: 16px;
-                        Text { text: "Default: HEVC / H.265 at up to 60 FPS, with adaptive bitrate."; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                        Caption { text: "Streaming mode"; }
-                        ComboBox {
-                            accessible-label: "Streaming mode";
-                            accessible-action-set-value(value) => { self.current-value = value; }
-                            height: 36px;
-                            model: ["HEVC / H.265 - 60 FPS (default)", "HEVC / H.265 - 30 FPS", "Auto (lossless VNC)", "ZRLE (lossless)", "Tight (lossless)", "Tight + JPEG (lossy)", "Hextile (lossless)", "Zlib (lossless)", "Raw (uncompressed)", "RRE (legacy)", "CoRRE (legacy)"];
-                            current-index <=> root.encoding-index;
-                        }
-                        Text { text: root.encoding-description; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                        Button { text: "Compare methods & bandwidth estimates"; clicked => { root.help-open = true; } }
-                        if root.encoding-index >= 2 : HorizontalLayout {
-                            Caption { text: "Compression effort: " + round(root.compression-level); }
-                            Slider { accessible-label: "Compression effort"; minimum: 0; maximum: 9; step: 1; value <=> root.compression-level; enabled: root.encoding-index <= 5 || root.encoding-index == 7; }
-                        }
-                        if root.encoding-index >= 2 : Text { text: "0 = less CPU, potentially more traffic. 9 = more CPU, potentially fewer bytes. This is a server hint, not a bitrate."; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                        if root.encoding-index == 5 : HorizontalLayout {
-                            Caption { text: "JPEG quality: " + round(root.jpeg-quality); }
-                            Slider { accessible-label: "JPEG quality"; minimum: 0; maximum: 9; step: 1; value <=> root.jpeg-quality; }
-                        }
-                        if root.encoding-index >= 2 : CheckBox { text: "Use a manual bandwidth target"; checked <=> root.manual-bandwidth; }
-                        if root.encoding-index < 2 : CheckBox { text: "Use a manual HEVC bitrate ceiling"; checked <=> root.manual-hevc-bitrate; }
-                        if root.manual-hevc-bitrate && root.encoding-index < 2 : HorizontalLayout {
-                            Caption { text: "HEVC bitrate (Mbps)"; }
-                            LineEdit { accessible-label: "HEVC bitrate Mbps"; text <=> root.hevc-mbps; input-type: InputType.decimal; }
-                        }
-                        if root.manual-bandwidth && root.encoding-index >= 2 : HorizontalLayout {
-                            Caption { text: "Target (Mbps)"; }
-                            LineEdit { accessible-label: "Bandwidth target Mbps"; text <=> root.target-mbps; input-type: InputType.decimal; }
-                        }
-                        Text { text: root.encoding-index < 2 ? "Adaptive bitrate is the default. A manual ceiling requests your chosen Mbps from the Mac; static screens and encoder limits can lower the actual rate, and bursts may exceed it. Compression, JPEG quality and the VNC bandwidth target do not apply. Apply reconnects when changing transports, HEVC presets or the bitrate ceiling." : "Automatic means no bandwidth target. A manual target spaces screen requests based on received bytes; bursts can exceed it. Apply reconnects automatically when switching to or from HEVC. Other VNC changes apply live."; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                        HorizontalLayout {
-                            Caption { text: "Frame rate limit"; }
-                            LineEdit { accessible-label: "Maximum FPS"; width: 88px; text <=> root.max-fps; input-type: InputType.number; }
-                        }
-                        if root.encoding-index < 2 : VerticalLayout {
-                            spacing: 6px;
-                            Caption { text: "Mac display"; }
-                            ComboBox {
-                                accessible-label: "Mac display";
-                                accessible-action-set-value(value) => { self.current-value = value; }
-                                model: root.mac-display-choices;
-                                current-index <=> root.mac-display-index;
-                            }
-                            Text { text: "Choose a virtual display for more resolutions. Apply reconnects the session. The Mac’s physical screen may go blank until you disconnect."; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                        }
-                        CheckBox { text: "Fit view"; checked <=> root.fit-view; toggled => { root.save-preferences(); } }
-                        Text { text: "Enlarge smaller desktops to fit the window while keeping their proportions."; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                        CheckBox { text: "Show live FPS counter"; checked <=> root.show-fps; toggled => { root.save-preferences(); } }
-                        Text { text: "FPS counts unique desktop images submitted for display, not monitor refreshes. An idle desktop correctly reads 0 FPS. Traffic measures VNC, HEVC/audio SRTP and SSH payloads in bits/s, excluding TCP/UDP/VPN overhead."; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                    }
-                }
-                if root.help-open : ScrollView {
-                    horizontal-scrollbar-policy: always-off;
-                    content-width: self.visible-width;
-                    content-height: guide-content.preferred-height;
-                    guide-content := VerticalLayout {
-                        spacing: 16px; padding-right: 16px;
-                        Text { text: root.estimate-context; color: root.muted; font-size: 12px; wrap: word-wrap; }
-                        for codec in root.codec-guide : VerticalLayout {
-                            spacing: 6px;
-                            Caption { text: codec.name; color: root.accent; }
-                            Text { text: codec.detail; color: root.ink; font-size: 12px; wrap: word-wrap; }
-                            Text { text: codec.estimate; color: root.muted; font-size: 11px; wrap: word-wrap; }
-                            Rectangle { height: 1px; background: root.outline; }
-                        }
-                        Text {
-                            text: "Standard VNC offers CopyRect and a Raw fallback; the Mac may ignore compression/JPEG hints. HEVC uses Apple's separate High Performance transport with encrypted control, SRTP video and optional audio. Video decoding is bundled; audio uses a separate converter. Mac account login and UDP on the VNC port and the next port are required. H.264 playback is not supported.";
-                            color: root.muted; font-size: 12px; wrap: word-wrap;
-                        }
-                    }
+                padding: 18px; spacing: 10px;
+                Text { text: root.update-restart-required ? "Restart required" : (root.update-available ? "MacCanvas " + root.update-version + " is ready" : "Update check"); color: root.ink; font-size: 16px; font-weight: 600; }
+                Text {
+                    text: root.update-available && (root.connected || root.connecting) ? "Disconnect when you're ready to install and restart. Your saved Macs and logins will stay." : root.update-status;
+                    color: root.muted; wrap: word-wrap; font-size: 12px;
                 }
                 HorizontalLayout {
-                    Button { text: root.help-open ? "Back to quality" : "Restore defaults"; clicked => { if root.help-open { root.help-open = false; } else { root.reset-streaming(); } } }
+                    Button { text: "Later"; clicked => { root.dismiss-update(); } }
                     Rectangle { background: transparent; horizontal-stretch: 1; }
-                    if !root.help-open : Button { text: "Apply"; primary: true; enabled: !root.connecting && !root.update-installing && root.audit-error == ""; clicked => { root.apply-streaming(); } }
+                    Button {
+                        text: root.update-restart-required ? "Restart needed" : (root.update-available ? "Update & restart" : "Retry");
+                        primary: true; enabled: !root.update-checking && !root.connected && !root.connecting && !root.update-restart-required;
+                        clicked => { if root.update-available { root.install-update(); } else { root.check-updates(); } }
+                    }
                 }
             }
         }
     }
-    if root.audio-open : AudioOverlay {
-        supported: root.hevc-active; connected: root.connected; missing: root.audio-codec-missing;
-        installing: root.audio-installing; status: root.audio-status;
-        muted <=> root.audio-muted; volume <=> root.audio-volume;
-        changed => { root.audio-changed(); }
-        install => { root.audio-install(); }
-        retry => { root.audio-retry(); }
-        close => { root.audio-open = false; if root.connected { root.focus-canvas(); } }
-    }
-    if root.about-open : AboutOverlay {
-        version: root.app-version; build-date: root.build-date; revision: root.build-revision;
-        target: root.build-target; compiler: root.build-compiler; author: root.author-name; log-path: root.log-path;
-        close => { root.about-open = false; if root.connected { root.focus-canvas(); } }
-        open-link(index) => { root.about-link(index); }
-        open-logs => { root.open-logs(); }
-    }
-
-    if root.clipboard-open : ClipboardOverlay {
-        shared <=> root.clipboard-shared; mode: root.clipboard-mode; vnc-available: !root.hevc-active;
-        host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
-        has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
-        connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
-        fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
-        status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;
-        changed => { root.clipboard-changed(); }
-        close => { root.close-clipboard(); }
-        paste-text => { root.paste-windows-text(); }
-        connect => { root.files-connect(); }
-        disconnect => { root.files-disconnect(); }
-        approve(accepted) => { root.files-approve(accepted); }
-        cancel => { root.files-cancel(); }
-        copy-text => { root.files-copy-text(); }
-        send-text => { root.files-send-text(); }
-    }
-
-    if root.files-open : FilesOverlay {
-        host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
-        has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;
-        connecting: root.files-connecting; busy: root.files-busy; key-pending: root.files-key-pending;
-        directory-ready: root.files-directory-ready;
-        fingerprint: root.files-fingerprint; key-algorithm: root.files-key-algorithm; key-command: root.files-key-command;
-        path <=> root.files-path; upload-name <=> root.files-upload-name; entries: root.file-entries;
-        status: root.files-status; error: root.files-error; progress: root.files-progress; progress-label: root.files-progress-label;
-        close => { root.files-close(); }
-        connect => { root.files-connect(); }
-        disconnect => { root.files-disconnect(); }
-        approve(accepted) => { root.files-approve(accepted); }
-        browse => { root.files-browse(); }
-        up => { root.files-up(); }
-        entry(index) => { root.files-entry(index); }
-        upload => { root.files-upload(); }
-        cancel => { root.files-cancel(); }
-    }
-
-    if root.update-banner && !root.update-installing && !root.modal-open : GlassPanel {
-        x: max(16px, root.width - self.width - 20px);
-        y: root.immersive ? 60px : 88px;
-        width: min(390px, root.width - 32px); height: 166px; radius: 18px; raised: true;
-        accessible-role: groupbox; accessible-label: "MacCanvas update notification";
-        TouchArea { }
-        VerticalLayout {
-            padding: 18px; spacing: 10px;
-            Text { text: root.update-restart-required ? "Restart required" : (root.update-available ? "MacCanvas " + root.update-version + " is ready" : "Update check"); color: root.ink; font-size: 16px; font-weight: 600; }
-            Text {
-                text: root.update-available && (root.connected || root.connecting) ? "Disconnect when you're ready to install and restart. Your saved Macs and logins will stay." : root.update-status;
-                color: root.muted; wrap: word-wrap; font-size: 12px;
-            }
-            HorizontalLayout {
-                Button { text: "Later"; clicked => { root.dismiss-update(); } }
-                Rectangle { background: transparent; horizontal-stretch: 1; }
-                Button {
-                    text: root.update-restart-required ? "Restart needed" : (root.update-available ? "Update & restart" : "Retry");
-                    primary: true; enabled: !root.update-checking && !root.connected && !root.connecting && !root.update-restart-required;
-                    clicked => { if root.update-available { root.install-update(); } else { root.check-updates(); } }
+    install-popup := PopupTransition {
+        open: root.update-installing;
+        if install-popup.visible : Rectangle {
+            background: #00000066;
+            TouchArea { }
+            GlassPanel {
+                x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + (1 - install-popup.progress) * 8px;
+                width: min(460px, parent.width - 48px); height: 180px; radius: 22px; raised: true;
+                VerticalLayout {
+                    padding: 24px; spacing: 16px;
+                    Text { text: "Updating MacCanvas"; color: root.ink; font-size: 21px; font-weight: 600; }
+                    Text { text: root.update-status; color: root.muted; wrap: word-wrap; font-size: 13px; }
+                    Rectangle {
+                        height: 5px; border-radius: 3px; background: root.outline;
+                        Rectangle { width: parent.width * root.update-progress; background: root.accent; border-radius: 3px; }
+                    }
+                    Text { text: "Keep this window open. MacCanvas will restart when ready."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                 }
             }
-        }
-    }
-    if root.update-installing : Rectangle {
-        background: #00000066;
-        TouchArea { }
-        GlassPanel {
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
-            width: min(460px, parent.width - 48px); height: 180px; radius: 22px; raised: true;
-            VerticalLayout {
-                padding: 24px; spacing: 16px;
-                Text { text: "Updating MacCanvas"; color: root.ink; font-size: 21px; font-weight: 600; }
-                Text { text: root.update-status; color: root.muted; wrap: word-wrap; font-size: 13px; }
-                Rectangle {
-                    height: 5px; border-radius: 3px; background: root.outline;
-                    Rectangle { width: parent.width * root.update-progress; background: root.accent; border-radius: 3px; }
-                }
-                Text { text: "Keep this window open. MacCanvas will restart when ready."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+            FocusScope {
+                init => { self.focus(); }
+                key-pressed(event) => { return accept; }
+                key-released(event) => { return accept; }
             }
-        }
-        FocusScope {
-            init => { self.focus(); }
-            key-pressed(event) => { return accept; }
-            key-released(event) => { return accept; }
         }
     }
 }

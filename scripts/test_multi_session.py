@@ -49,8 +49,10 @@ def check_fullscreen_slide(process, window, fixture, scale):
     assert pixel(window, x, y) == 0
     user32.SetPhysicalCursorPos(round(bounds["x"] + bounds["width"] / 2),
                                 round(bounds["y"] + bounds["height"] / 2))
+    time.sleep(0.65)
+    assert pixel(window, x, y) == 0, "Fullscreen controls hid before the grace period elapsed"
     seen = set()
-    deadline = time.monotonic() + 0.6
+    deadline = time.monotonic() + 0.8
     while time.monotonic() < deadline:
         seen.add(pixel(window, x, y))
         time.sleep(0.005)

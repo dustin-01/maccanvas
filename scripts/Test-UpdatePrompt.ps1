@@ -41,6 +41,7 @@ try {
     if ($null -ne $window.FindFirst([Windows.Automation.TreeScope]::Descendants, $condition)) {
         throw 'Later did not dismiss the update prompt.'
     }
+    (Find-UpdateControl 'Settings').GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     (Find-UpdateControl 'Check for updates').GetCurrentPattern([Windows.Automation.InvokePattern]::Pattern).Invoke()
     $null = Find-UpdateControl 'MacCanvas update notification'
     Write-Output 'New-version prompt, explicit update confirmation, Later, and reopening the prompt: PASS'

@@ -2,6 +2,7 @@ import { GlassTheme, GlassPanel, Button } from "glass.slint";
 import { ScrollView } from "std-widgets.slint";
 
 export component AboutOverlay inherits Rectangle {
+    in property <float> reveal: 1;
     in property <string> version;
     in property <string> build-date;
     in property <string> revision;
@@ -18,7 +19,7 @@ export component AboutOverlay inherits Rectangle {
         init => { self.focus(); }
         key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
     GlassPanel {
-        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+        x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + (1 - root.reveal) * 8px;
         width: min(590px, parent.width - 48px); height: min(670px, parent.height - 48px);
         radius: 24px; raised: true;
         TouchArea { }

@@ -4,6 +4,7 @@ import { GlassTheme, GlassPanel, Button, CheckBox } from "glass.slint";
 export struct FileRow { name: string, detail: string, directory: bool, regular: bool }
 
 export component SshSharingOverlay inherits Rectangle {
+    in property <float> reveal: 1;
     in property <bool> clipboard-view: false;
     in-out property <bool> shared;
     in property <string> mode;
@@ -48,7 +49,7 @@ export component SshSharingOverlay inherits Rectangle {
         init => { self.focus(); }
         key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
         GlassPanel {
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + (1 - root.reveal) * 8px;
             width: min(root.clipboard-view ? 620px : 840px, parent.width - 40px);
             height: min(root.clipboard-view ? 650px : 720px, parent.height - 40px);
             raised: true; radius: 24px;

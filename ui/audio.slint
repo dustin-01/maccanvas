@@ -1,6 +1,7 @@
 import { GlassTheme, GlassPanel, Button, CheckBox, Slider } from "glass.slint";
 
 export component AudioOverlay inherits Rectangle {
+    in property <float> reveal: 1;
     in property <bool> supported;
     in property <bool> connected;
     in property <bool> missing;
@@ -18,7 +19,7 @@ export component AudioOverlay inherits Rectangle {
         init => { self.focus(); }
         key-pressed(event) => { if event.text == Key.Escape { root.close(); return accept; } return reject; }
         GlassPanel {
-            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2;
+            x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2 + (1 - root.reveal) * 8px;
             width: min(520px, parent.width - 48px); height: min(470px, parent.height - 40px);
             radius: 24px; raised: true;
             TouchArea { }

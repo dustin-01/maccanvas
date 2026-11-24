@@ -17,7 +17,7 @@ One portable viewer. No extra DLLs or subscription.
 - **Sharp scaling:** larger desktops shrink to fit the window. Turn on **Fit view** in **Picture & connection** to enlarge smaller desktops too. Both modes preserve the Mac's aspect ratio.
 - **Visible cursor:** keep your normal Windows pointer and accessibility size.
 - **Multiple Macs.** Keep several desktops connected in one window. Click a Mac’s card to bring it forward, or use the Mac picker beside the app name when the sidebar is collapsed.
-- **Protected logins:** Windows Credential Manager stores saved logins. Windows Hello approval is on by default and can be turned off in the sidebar. Saved passwords cannot be displayed.
+- **Protected logins:** Windows Credential Manager stores saved logins. Windows Hello approval is on by default and can be turned off in **Settings**. Saved passwords cannot be displayed.
 - **Live statistics:** animated download/upload history, automatic kbps/Mbps units, and an optional FPS counter.
 - **HEVC performance modes:** Apple's H.265 stream at up to 30 or 60 FPS, with encrypted control/video, a custom bitrate ceiling, Windows-selected GPU decoding, and a bundled native fallback.
 - **Mac audio:** optional HEVC-session playback through your Windows output, with local volume and mute controls.
@@ -45,7 +45,7 @@ from [Releases](https://github.com/false00/maccanvas/releases/latest) and run it
 When a newer version is available, choose **Update & restart** or **Later**.
 Disconnect first if a Mac session is active. The app verifies the download and
 updates its own executable without changing saved Macs or credentials.
-Its folder must be writable. **Check updates** in the sidebar retries the check;
+Its folder must be writable. **Check updates** in **Settings** retries the check;
 the installer command remains available for manual updates.
 
 **Unsigned application:** only run downloads and remote scripts you trust.
@@ -56,19 +56,20 @@ or bypass Windows application-control policies.
 
 1. On the Mac, enable **System Settings → General → Sharing → Screen Sharing**
    and allow your macOS account.
-2. Select **Create new connection**. Enter the Mac's name, IP/VPN address, and port `5900`.
+2. Open the connection form with **Add a Mac**. Enter the Mac's name, IP/VPN address, and port `5900`.
 3. Choose **Mac account** and enter its username/password. Select **Connect to Mac**.
-4. To reuse your Mac password, enable **Save login in Credential Manager**. To connect without a Windows Hello prompt, uncheck **Require Windows Hello for saved logins** in the sidebar.
+4. To reuse your Mac password, enable **Save login in Credential Manager**. To connect without a Windows Hello prompt, uncheck **Require Windows Hello for saved logins** in **Settings**.
    Credentials are saved only after a successful login.
 
-To open another session, choose **Connect** on another Mac’s card or use **New**
+To open another session, choose **Connect** on another Mac’s card or use **Add a Mac**
 to enter its address. Connected Macs stay online as you switch. The sidebar
 shows live previews of the other desktops. When you switch, the incoming desktop
 briefly shows the Mac's saved name. Keyboard, mouse, and Mac audio follow
 the desktop in view. **Disconnect** closes the displayed session and returns
 you to another open Mac. In full screen, hold the pointer at the top edge for
-one second to reveal the traffic graph, Mac picker, and **Exit full screen**.
-Enable **Capture cursor on fullscreen** in the sidebar to keep the pointer on the
+0.2 seconds to reveal the traffic graph, Mac picker, and **Exit full screen**.
+The controls stay visible for one second after the pointer leaves.
+Enable **Capture cursor on fullscreen** in **Settings** to keep the pointer on the
 viewer's monitor while controlling a Mac. Exiting full screen or switching to
 another Windows app releases the pointer.
 
