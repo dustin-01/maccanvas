@@ -112,10 +112,41 @@ pub(super) struct Files {
     // The SSH worker accepts one UI operation at a time. Only a copy started
     // since this desktop last gained focus may write its response to Windows.
     apply_clipboard_read: bool,
+    auto_attempt: Option<u64>,
+    sync: ClipboardSync,
+}
+
+#[derive(Default)]
+struct ClipboardSync {
+    windows: Option<u32>,
+    foreground: bool,
+    pending_windows: Option<u32>,
+    retry_windows: Option<std::time::Instant>,
+    mac: Option<u64>,
+    // A reply may arrive after a desktop switch or after a newer Windows copy.
+    pending_poll: Option<(uuid::Uuid, u32)>,
+    next_poll: Option<std::time::Instant>,
+}
+
+impl ClipboardSync {
+    fn observe_windows(&mut self, sequence: u32, foreground: bool) {
+        let previous = *self.windows.get_or_insert(sequence);
+        if foreground && sequence != previous {
+            if !self.foreground {
+                self.pending_windows = Some(sequence);
+            } else if self.pending_windows != Some(sequence) {
+                // A copy made in the viewer's own forms is local UI input.
+                self.windows = Some(sequence);
+                self.pending_windows = None;
+            }
+        }
+        self.foreground = foreground;
+    }
 }
 
 impl Files {
     pub fn clear_pending_clipboard(&mut self) {
+        self.sync = ClipboardSync::default();
         self.pending_clipboard = None;
         self.apply_clipboard_read = false;
     }
@@ -278,6 +309,55 @@ fn prepare_ssh(app: &App, state: &mut State) -> Result<()> {
     Ok(())
 }
 
+fn start_ssh(app: &App, state: &mut State, credentials: CredentialSource) -> Result<()> {
+    if !app.get_connected() || state.updater.installing {
+        return Err(Error::Transfer(
+            "Keep the Mac connection open while using SSH".into(),
+        ));
+    }
+    if state.active.files.client.is_some() {
+        return Err(Error::Transfer(
+            "SSH is already connected or connecting".into(),
+        ));
+    }
+    if state.active.files.retiring.len() >= 4 {
+        return Err(Error::Transfer(
+            "Wait for the previous SSH connection to close".into(),
+        ));
+    }
+    let profile = state.active.files.profile.clone().ok_or_else(|| {
+        Error::Transfer("Open Files or Clipboard from an active Mac connection".into())
+    })?;
+    let port = app
+        .get_files_port()
+        .parse::<u16>()
+        .ok()
+        .filter(|&port| port != 0)
+        .ok_or_else(|| Error::Transfer("SSH port must be 1-65535".into()))?;
+    let scope = state.audit.child(json!({"profile.id":profile.id,"server.address":profile.host,"server.port":port,"network.protocol.name":"ssh"}));
+    let pinned = state
+        .settings
+        .ssh_host_keys
+        .iter()
+        .find(|key| key.endpoint(&profile.host, port))
+        .cloned();
+    let client = Client::start(Request {
+        profile,
+        port,
+        credentials,
+        pinned,
+        require_windows_hello: state.settings.require_windows_hello,
+        window: window_handle(app)?,
+        audit: scope.clone(),
+    })?;
+    state.active.files.scope = Some(scope);
+    state.active.files.client = Some(client);
+    app.set_files_connecting(true);
+    app.set_files_error("".into());
+    app.set_files_status("Verifying the Mac's SSH identity before using credentials...".into());
+    Ok(())
+}
+
 fn clipboard_command(app: &App, state: &mut State, action: ClipboardAction) -> Result<()> {
     let command = match action {
         ClipboardAction::Copy => Command::CopyClipboard,
@@ -304,6 +384,8 @@ fn request_clipboard(app: &App, state: &mut State, action: ClipboardAction) -> R
         if !app.get_modal_open() {
             app.invoke_focus_canvas();
         }
+    } else if app.get_files_connecting() {
+        state.active.files.pending_clipboard = Some(action);
     } else {
         prepare_ssh(app, state)?;
         state.active.files.pending_clipboard = Some(action);
@@ -367,37 +449,28 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     let weak = app.as_weak();
     let connecting = state.clone();
     app.on_files_connect(move || {
-        let Some(app) = weak.upgrade() else { return; };
+        let Some(app) = weak.upgrade() else {
+            return;
+        };
         let result = (|| {
             let mut state = connecting.borrow_mut();
-            if !app.get_connected() || state.updater.installing { return Err(Error::Transfer("Keep the Mac connection open while using SSH".into())); }
-            if state.active.files.client.is_some() { return Err(Error::Transfer("SSH is already connected or connecting".into())); }
-            if state.active.files.retiring.len() >= 4 { return Err(Error::Transfer("Wait for the previous SSH connection to close".into())); }
-            let profile = state.active.files.profile.clone().ok_or_else(|| Error::Transfer("Open Files or Clipboard from an active Mac connection".into()))?;
-            let port = app.get_files_port().parse::<u16>().ok().filter(|&port| port != 0)
-                .ok_or_else(|| Error::Transfer("SSH port must be 1-65535".into()))?;
-            let credentials = if app.get_files_use_saved() { CredentialSource::Saved } else {
-                let credentials = Credentials::new(app.get_files_username().to_string(),app.get_files_password().to_string());
+            let credentials = if app.get_files_use_saved() {
+                CredentialSource::Saved
+            } else {
+                let credentials = Credentials::new(
+                    app.get_files_username().to_string(),
+                    app.get_files_password().to_string(),
+                );
                 credentials.validate(AuthMode::MacLogin)?;
                 CredentialSource::Manual(credentials)
             };
-            let scope = state.audit.child(json!({"profile.id":profile.id,"server.address":profile.host,"server.port":port,"network.protocol.name":"ssh"}));
-            let pinned = state.settings.ssh_host_keys.iter().find(|key| key.endpoint(&profile.host,port)).cloned();
-            let client = Client::start(Request {
-                profile,
-                port,
-                credentials,
-                pinned,
-                require_windows_hello: state.settings.require_windows_hello,
-                window: window_handle(&app)?,
-                audit: scope.clone(),
-            })?;
-            state.active.files.scope = Some(scope); state.active.files.client = Some(client);
-            app.set_files_connecting(true); app.set_files_error("".into()); app.set_files_status("Verifying the Mac's SSH identity before using credentials...".into());
-            Ok(())
+            start_ssh(&app, &mut state, credentials)
         })();
-        app.set_files_password("".into()); app.set_files_username("".into());
-        if let Err(error) = result { fail(&app,error); }
+        app.set_files_password("".into());
+        app.set_files_username("".into());
+        if let Err(error) = result {
+            fail(&app, error);
+        }
     });
 
     let weak = app.as_weak();
@@ -611,6 +684,72 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
     });
 }
 
+fn auto_clipboard(app: &App, state: &mut State) -> Result<()> {
+    if !app.get_connected() {
+        return Ok(());
+    }
+    if !state.settings.auto_clipboard_ssh {
+        state.active.files.auto_attempt = None;
+    } else if state.active.files.auto_attempt != Some(state.active.generation) {
+        state.active.files.auto_attempt = Some(state.active.generation);
+        if state.active.files.client.is_none()
+            && state
+                .active
+                .connection_profile
+                .as_ref()
+                .is_some_and(|p| p.authentication == AuthMode::MacLogin)
+            && let Some(credentials) = state.active.connection_credentials.clone()
+        {
+            prepare_ssh(app, state)?;
+            start_ssh(app, state, credentials)?;
+        }
+    }
+    let files = &mut state.active.files;
+    if !state.settings.auto_clipboard_sync {
+        files.sync = ClipboardSync::default();
+        return Ok(());
+    }
+    let sequence = native::sequence();
+    let owner = window_handle(app)?;
+    let foreground = native::foreground(owner);
+    files.sync.observe_windows(sequence, foreground);
+    if !app.get_files_connected() || app.get_files_busy() || app.get_modal_open() {
+        return Ok(());
+    }
+    let now = std::time::Instant::now();
+    if files.sync.windows != Some(sequence) {
+        // A local copy takes priority until the next switch back to this window.
+        if foreground
+            && files.sync.pending_windows == Some(sequence)
+            && files.sync.retry_windows.is_none_or(|retry| retry <= now)
+        {
+            files.sync.retry_windows = Some(now + std::time::Duration::from_secs(2));
+            if let Some((snapshot, text)) = native::read_snapshot(owner)?
+                && snapshot == sequence
+            {
+                files.command(app, Command::SendClipboard { text, sequence })?;
+            }
+            files.sync.windows = Some(sequence);
+            files.sync.pending_windows = None;
+            files.sync.retry_windows = None;
+        }
+        return Ok(());
+    }
+    if files.sync.pending_poll.is_none()
+        && files.sync.next_poll.is_none_or(|next| next <= now)
+        && let Some(client) = &files.client
+    {
+        let id = uuid::Uuid::new_v4();
+        client.command(Command::PollClipboard {
+            id,
+            previous: files.sync.mac,
+        })?;
+        files.sync.pending_poll = Some((id, sequence));
+        files.sync.next_poll = Some(now + std::time::Duration::from_millis(650));
+    }
+    Ok(())
+}
+
 pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
     while let Some(index) = state
         .active
@@ -655,8 +794,8 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 );
                 state.active.files.approval = Some((key, reply));
                 app.set_files_key_pending(true);
-                if !app.get_clipboard_open() {
-                    app.set_files_open(true);
+                if !app.get_files_open() {
+                    app.set_clipboard_open(true);
                 }
             }
             Event::Connected => {
@@ -703,6 +842,47 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                     .files
                     .command(app, Command::List(state.active.files.directory.clone()))?;
             }
+            Event::ClipboardPoll { id, result } => {
+                let sync = &mut state.active.files.sync;
+                let Some((pending, windows)) = sync.pending_poll else {
+                    continue;
+                };
+                if id != pending {
+                    continue;
+                }
+                sync.pending_poll = None;
+                if !state.settings.auto_clipboard_sync {
+                    continue;
+                }
+                match result {
+                    Ok((revision, text)) => {
+                        if app.get_files_busy() {
+                            continue;
+                        }
+                        if let Some(text) = text
+                            && windows == native::sequence()
+                        {
+                            let owner = window_handle(app)?;
+                            if native::read_snapshot(owner)?
+                                .is_none_or(|(_, current)| *current != *text)
+                                && let Some(sequence) =
+                                    state.clipboard.receive_if_current(owner, &text, windows)?
+                            {
+                                sync.windows = Some(sequence);
+                                sync.mac = Some(revision);
+                                scope(&state.active.files)?.critical("clipboard.applied", Level::Info, json!({"clipboard.direction":"mac_to_windows","clipboard.text_bytes":text.len(),"network.protocol.name":"ssh"}))?;
+                                continue;
+                            }
+                        }
+                        sync.mac = Some(revision);
+                    }
+                    Err(error) => {
+                        sync.next_poll =
+                            Some(std::time::Instant::now() + std::time::Duration::from_secs(30));
+                        fail(app, error);
+                    }
+                }
+            }
             Event::Clipboard(text) => {
                 app.set_files_busy(false);
                 if !std::mem::take(&mut state.active.files.apply_clipboard_read) {
@@ -710,6 +890,7 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                     continue;
                 }
                 let result = state.clipboard.receive(window_handle(app)?,&text).and_then(|_| {
+                    state.active.files.sync.windows = Some(native::sequence());
                     scope(&state.active.files)?.critical("clipboard.applied",Level::Info,json!({"clipboard.direction":"mac_to_windows","clipboard.text_bytes":text.len(),"network.protocol.name":"ssh"}))
                 });
                 match result {
@@ -727,6 +908,9 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
             }
             Event::ClipboardSent(sequence) => {
                 state.clipboard.sent(sequence);
+                if native::sequence() == sequence {
+                    state.active.files.sync.windows = Some(sequence);
+                }
                 app.set_files_busy(false);
                 app.set_files_status(
                     "Windows plain text is now on the Mac clipboard. Paste it in your Mac app."
@@ -802,7 +986,7 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
             });
         }
     }
-    Ok(())
+    auto_clipboard(app, state)
 }
 
 fn safe_name(name: &str) -> String {
@@ -841,5 +1025,26 @@ mod tests {
         assert_eq!(safe_name("LPT1"), "_LPT1");
         assert_eq!(safe_name(".."), "download");
         assert_eq!(safe_name("hello\u{1f34e}.txt"), "hello\u{1f34e}.txt");
+    }
+}
+
+#[cfg(test)]
+mod sync_tests {
+    use super::ClipboardSync;
+
+    #[test]
+    fn windows_copies_are_selected_on_refocus_and_survive_a_busy_ssh_worker() {
+        let mut sync = ClipboardSync::default();
+        sync.observe_windows(5, true);
+        assert_eq!(sync.pending_windows, None);
+        sync.observe_windows(6, false);
+        sync.observe_windows(7, false);
+        assert_eq!(sync.windows, Some(5));
+        sync.observe_windows(7, true);
+        sync.observe_windows(7, true);
+        assert_eq!(sync.pending_windows, Some(7));
+        sync.observe_windows(8, true);
+        assert_eq!(sync.pending_windows, None);
+        assert_eq!(sync.windows, Some(8));
     }
 }

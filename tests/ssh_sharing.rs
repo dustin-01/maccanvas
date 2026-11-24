@@ -273,7 +273,16 @@ impl server::Handler for Ssh {
                 channel.close().await.unwrap();
                 return;
             }
-            if command.contains("fileHandleWithStandardOutput") {
+            if command.contains("board.changeCount") {
+                if command.ends_with(" baseline") || command.ends_with(" 12") {
+                    channel.data(&b"12\n"[..]).await.unwrap();
+                } else {
+                    channel
+                        .data(format!("12:text\n{CLIPBOARD}").as_bytes())
+                        .await
+                        .unwrap();
+                }
+            } else if command.contains("fileHandleWithStandardOutput") {
                 let text = data.clipboard.lock().unwrap().clone();
                 channel.data(text.as_slice()).await.unwrap();
             } else {
@@ -626,6 +635,25 @@ fn verified_ssh_transfers_files_and_unicode_without_logging_contents_or_password
     assert!(
         client.counters.sent.load(Ordering::Relaxed) > std::fs::metadata(&received).unwrap().len()
     );
+    for previous in [None, Some(11), Some(12)] {
+        let id = uuid::Uuid::new_v4();
+        client
+            .command(Command::PollClipboard { id, previous })
+            .unwrap();
+        wait(&client, |event| match event {
+            Event::ClipboardPoll { id: reply, result } => {
+                assert_eq!(reply, id);
+                let (revision, text) = result.unwrap();
+                assert_eq!(revision, 12);
+                assert_eq!(
+                    text.as_ref().map(|text| text.as_str()),
+                    (previous == Some(11)).then_some(CLIPBOARD)
+                );
+                true
+            }
+            _ => false,
+        });
+    }
     client.command(Command::CopyClipboard).unwrap();
     wait(&client, |event| match event {
         Event::Clipboard(text) => {

@@ -140,6 +140,10 @@ pub struct Settings {
     pub audio: crate::audio::Settings,
     #[serde(default)]
     pub clipboard_enabled: bool,
+    #[serde(default = "enabled")]
+    pub auto_clipboard_ssh: bool,
+    #[serde(default = "enabled")]
+    pub auto_clipboard_sync: bool,
     #[serde(default)]
     pub ssh_host_keys: Vec<SshHostKey>,
 }
@@ -170,6 +174,8 @@ impl Default for Settings {
             streaming: StreamSettings::default(),
             audio: crate::audio::Settings::default(),
             clipboard_enabled: false,
+            auto_clipboard_ssh: true,
+            auto_clipboard_sync: true,
             ssh_host_keys: Vec::new(),
         }
     }

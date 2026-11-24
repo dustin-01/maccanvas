@@ -106,6 +106,10 @@ pub fn read_snapshot(owner: isize) -> Result<Option<(u32, Zeroizing<String>)>> {
 }
 
 pub fn write(owner: isize, text: &str) -> Result<()> {
+    write_if_current(owner, text, None).map(|_| ())
+}
+
+fn write_if_current(owner: isize, text: &str, expected: Option<u32>) -> Result<Option<u32>> {
     super::validate(text, true)?;
     let text = Zeroizing::new(super::normalize(text).replace('\n', "\r\n"));
     let units = Zeroizing::new(text.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
@@ -126,14 +130,19 @@ pub fn write(owner: isize, text: &str) -> Result<()> {
     let result = (|| {
         unlock(allocation)?;
         let mut clipboard = Clipboard::open(owner)?;
+        if expected.is_some_and(|expected| expected != sequence()) {
+            clipboard.close()?;
+            return Ok(None);
+        }
         unsafe { EmptyClipboard() }.map_err(|error| Error::Clipboard(error.to_string()))?;
         unsafe { SetClipboardData(UNICODE_TEXT, Some(HANDLE(allocation.0))) }
             .map_err(|error| Error::Clipboard(error.to_string()))?;
         transferred = true;
+        let applied = sequence();
         clipboard.close()?;
-        Ok(())
+        Ok(Some(applied))
     })();
-    if result.is_err() && !transferred {
+    if !transferred {
         unsafe { GlobalFree(Some(allocation)) }
             .map_err(|error| Error::Clipboard(error.to_string()))?;
     }
@@ -161,6 +170,19 @@ impl Watcher {
 
     pub fn sent(&mut self, sequence: u32) {
         self.sent = Some(sequence);
+    }
+
+    pub fn receive_if_current(
+        &mut self,
+        owner: isize,
+        text: &str,
+        expected: u32,
+    ) -> Result<Option<u32>> {
+        let applied = write_if_current(owner, text, Some(expected))?;
+        if applied.is_some() {
+            self.remote = applied;
+        }
+        Ok(applied)
     }
 
     pub fn receive(&mut self, owner: isize, text: &str) -> Result<()> {

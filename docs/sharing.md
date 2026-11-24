@@ -113,17 +113,21 @@ does not prove that the server or its filesystem is uncompromised.
 
 ## Encrypted Unicode clipboard
 
-Use **Copy Mac** or **Send Windows**, each with a clipboard icon, in the main toolbar.
-The first action opens SSH authentication. After a successful connection the
-Clipboard panel closes and completes that action; subsequent clicks reuse SSH
-without reopening the panel. Closing authentication before connecting cancels
-the requested action. **Send Windows** sets the Mac clipboard, ready to
-paste in the Mac app with Ctrl+V when Ctrl-to-Command is enabled.
-These are explicit operations, independent of automatic VNC clipboard sharing.
+**Automatically connect clipboard SSH** starts the shared SSH connection when
+you connect with a Mac account. **Automatically sync clipboard contents** watches
+the active Mac for new plain text and sends changed Windows text when MacCanvas
+regains focus. Both options are in **Settings** and default to on. Starting
+sync establishes a baseline on both sides so an old clipboard is not imported.
+When Windows has a newer copy, it takes priority over a pending Mac read.
+
+**Copy Mac** and **Send Windows** remain available for manual transfers. If SSH
+is disconnected, these buttons open the login panel. Classic VNC password
+sessions need a separate Mac account login there. Manual SSH connections also
+support automatic sync when it is enabled.
 Use the same Mac account as the shared desktop. macOS may restrict pasteboard
 access when that account has no usable logged-in desktop session.
 
-MacCanvas invokes two fixed commands through the encrypted SSH session. They use
+MacCanvas invokes clipboard helpers through the encrypted SSH session. They use
 Apple's built-in JavaScript for Automation and AppKit `NSPasteboardTypeString`.
 Text travels through standard input/output, never through an interpolated shell
 command, argument, temporary helper file, or audit record. This preserves literal

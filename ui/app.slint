@@ -183,6 +183,8 @@ export component App inherits Window {
     in property <string> audit-error;
     in-out property <bool> about-open: false;
     in-out property <bool> clipboard-open: false;
+    in-out property <bool> auto-clipboard-ssh: true;
+    in-out property <bool> auto-clipboard-sync: true;
     in-out property <bool> clipboard-shared: false;
     in property <string> clipboard-mode: "Standard VNC: Latin-1 compatibility mode.";
     in-out property <bool> files-open: false;
@@ -793,6 +795,9 @@ export component App inherits Window {
                             content-width: self.visible-width;
                             VerticalLayout {
                                 spacing: 10px; padding-right: 12px;
+                                CheckBox { text: "Automatically connect clipboard SSH"; checked <=> root.auto-clipboard-ssh; toggled => { root.save-preferences(); } }
+                                CheckBox { text: "Automatically sync clipboard contents"; checked <=> root.auto-clipboard-sync; toggled => { root.save-preferences(); } }
+                                Text { text: "Share copied plain text with the Mac you are viewing over SSH."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                                 CheckBox { text: "Ctrl shortcuts act as Command"; checked <=> root.ctrl-as-command; toggled => { root.save-preferences(); } }
                                 CheckBox { text: "Capture cursor on fullscreen"; checked <=> root.capture-cursor-fullscreen; toggled => { root.save-preferences(); } }
                                 VerticalLayout {

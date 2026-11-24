@@ -66,6 +66,22 @@ try {
     var code = typeof error.errorNumber === "number" ? error.errorNumber : typeof error.number === "number" ? error.number : null;
     throw Error("MACCANVAS_CLIPBOARD_DIAGNOSTIC=" + JSON.stringify({version:1, stage:stage, reason:reason, error_code:code, desktop_session:desktop, same_desktop_account:sameAccount}));
 }'"#;
+// Emit a revision line on every check. Only fetch text for a new revision.
+const POLL_CLIPBOARD: &str = r#"/usr/bin/osascript -l JavaScript -e '
+function run(args) {
+    ObjC.import("AppKit");
+    var board = $.NSPasteboard.generalPasteboard;
+    var revision = String(board.changeCount);
+    var out = $.NSFileHandle.fileHandleWithStandardOutput;
+    var text = null;
+    if (args[0] !== "baseline" && args[0] !== revision) {
+        text = board.stringForType($.NSPasteboardTypeString);
+    }
+    var hasText = text !== null && !text.isNil();
+    out.writeData($(revision + (hasText ? ":text" : "") + "\n").dataUsingEncoding($.NSUTF8StringEncoding));
+    if (hasText) { out.writeData(text.dataUsingEncoding($.NSUTF8StringEncoding)); }
+}'"#;
+
 const WRITE_CLIPBOARD: &str = r#"/usr/bin/osascript -l JavaScript -e '
 var stage = "load_foundation", reason = null, desktop = null, sameAccount = null;
 try {
@@ -237,6 +253,10 @@ pub enum Event {
     },
     Clipboard(Zeroizing<String>),
     ClipboardSent(u32),
+    ClipboardPoll {
+        id: Uuid,
+        result: Result<(u64, Option<Zeroizing<String>>)>,
+    },
     Failed(String),
     DirectoryFailed {
         path: String,
@@ -257,6 +277,10 @@ pub enum Command {
         local: PathBuf,
     },
     CopyClipboard,
+    PollClipboard {
+        id: Uuid,
+        previous: Option<u64>,
+    },
     SendClipboard {
         text: Zeroizing<String>,
         sequence: u32,
@@ -283,6 +307,7 @@ impl Command {
                 valid_path(remote)?;
                 json!({"operation.name":"file_download","file.source.path":remote,"file.destination.path":local})
             }
+            Self::PollClipboard { .. } => json!({"operation.name":"clipboard_poll"}),
             Self::CopyClipboard => {
                 json!({"operation.name":"clipboard_copy","clipboard.direction":"mac_to_windows"})
             }
@@ -681,6 +706,15 @@ async fn run(
                 command = commands.recv() => match command { Some(command) => command, None => break },
             },
         };
+        if let Command::PollClipboard { id, previous } = command {
+            let revision = previous.map_or_else(|| "baseline".into(), |value| value.to_string());
+            let helper = format!("{POLL_CLIPBOARD} {revision}");
+            let result = mac_clipboard(&ssh, None, Some(&helper), control, &request.audit)
+                .await
+                .and_then(|output| parse_clipboard_poll(&output));
+            emit(events, Event::ClipboardPoll { id, result })?;
+            continue;
+        }
         let browse_path = match &command {
             Command::List(path) => Some(path.clone()),
             _ => None,
@@ -720,11 +754,12 @@ async fn run(
                         )
                     })
             }
-            Command::CopyClipboard => mac_clipboard(&ssh, None, control, &operation)
+            Command::PollClipboard { .. } => unreachable!("handled above"),
+            Command::CopyClipboard => mac_clipboard(&ssh, None, None, control, &operation)
                 .await
                 .and_then(|text| emit(events, Event::Clipboard(text))),
             Command::SendClipboard { text, sequence } => {
-                mac_clipboard(&ssh, Some(text), control, &operation)
+                mac_clipboard(&ssh, Some(text), None, control, &operation)
                     .await
                     .and_then(|_| emit(events, Event::ClipboardSent(sequence)))
             }
@@ -1204,9 +1239,31 @@ async fn remote_hash(
     after_close(result, closed, scope)
 }
 
+fn parse_clipboard_poll(output: &str) -> Result<(u64, Option<Zeroizing<String>>)> {
+    let invalid = || Error::Clipboard("The Mac returned an invalid clipboard revision".into());
+    let (header, payload) = output.split_once('\n').ok_or_else(invalid)?;
+    let revision = header
+        .strip_suffix(":text")
+        .unwrap_or(header)
+        .parse()
+        .map_err(|_| invalid())?;
+    if header.ends_with(":text") {
+        clipboard::validate(payload, true)?;
+        Ok((
+            revision,
+            Some(Zeroizing::new(clipboard::normalize(payload))),
+        ))
+    } else if payload.is_empty() {
+        Ok((revision, None))
+    } else {
+        Err(invalid())
+    }
+}
+
 async fn mac_clipboard(
     ssh: &client::Handle<HostVerifier>,
     input: Option<Zeroizing<String>>,
+    poll_helper: Option<&str>,
     control: &Control,
     scope: &Scope,
 ) -> Result<Zeroizing<String>> {
@@ -1215,10 +1272,12 @@ async fn mac_clipboard(
     if let Some(text) = &input {
         clipboard::validate(text, true)?;
     }
-    scope.critical("ssh.clipboard.requested",Level::Info,json!({"clipboard.direction":if sending { "windows_to_mac" } else { "mac_to_windows" },"clipboard.encoding":"utf8","network.encrypted":true}))?;
+    if poll_helper.is_none() {
+        scope.critical("ssh.clipboard.requested",Level::Info,json!({"clipboard.direction":if sending { "windows_to_mac" } else { "mac_to_windows" },"clipboard.encoding":"utf8","network.encrypted":true}))?;
+    }
     let mut channel = ssh.channel_open_session().await?;
     let result = tokio::time::timeout(Duration::from_secs(20),async {
-        channel.exec(true,if sending { WRITE_CLIPBOARD } else { READ_CLIPBOARD }).await?;
+        channel.exec(true,poll_helper.unwrap_or(if sending { WRITE_CLIPBOARD } else { READ_CLIPBOARD })).await?;
         if let Some(text) = &input { channel.data(text.as_bytes()).await?; }
         channel.eof().await?;
         let mut output = Zeroizing::new(Vec::new());
@@ -1228,7 +1287,7 @@ async fn mac_clipboard(
             control.check()?;
             match message {
                 ChannelMsg::Data { data } => {
-                    if output.len().saturating_add(data.len()) > clipboard::MAX_TEXT { return Err(Error::Transfer("Mac clipboard output exceeds 1 MiB".into())); }
+                    if output.len().saturating_add(data.len()) > clipboard::MAX_TEXT + if poll_helper.is_some() { 32 } else { 0 } { return Err(Error::Transfer("Mac clipboard output exceeds 1 MiB".into())); }
                     output.extend_from_slice(&data);
                 }
                 ChannelMsg::ExtendedData { data,.. } => {
@@ -1262,12 +1321,14 @@ async fn mac_clipboard(
             return Err(Error::Clipboard(format!("Mac clipboard helper failed (exit {exit}). {detail}")));
         }
         let output = Zeroizing::new(std::str::from_utf8(&output).map_err(|_| Error::Transfer("The Mac clipboard did not return valid UTF-8".into()))?.to_owned());
+        if poll_helper.is_none() {
         clipboard::validate(&output,true)?;
         scope.critical("ssh.clipboard.completed",Level::Info,json!({
             "clipboard.direction":if sending { "windows_to_mac" } else { "mac_to_windows" },
             "clipboard.text_bytes":input.as_ref().map_or(output.len(),|text| text.len()),"clipboard.encoding":"utf8",
             "clipboard.helper.diagnostic_bytes":stderr.len(),"event.outcome":"success",
         }))?;
+        }
         Ok(output)
     }).await.map_err(|_| Error::Transfer("The Mac clipboard helper timed out".into()))?;
     let closed = channel.close().await.map_err(Error::from);

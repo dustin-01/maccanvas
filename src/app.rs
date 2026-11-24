@@ -417,6 +417,8 @@ fn preferences(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     let mut state = state.borrow_mut();
     let previous_hello = state.settings.require_windows_hello;
     state.settings.require_windows_hello = app.get_require_windows_hello();
+    state.settings.auto_clipboard_ssh = app.get_auto_clipboard_ssh();
+    state.settings.auto_clipboard_sync = app.get_auto_clipboard_sync();
     state.settings.capture_cursor_fullscreen = app.get_capture_cursor_fullscreen();
     state.settings.ctrl_as_command = app.get_ctrl_as_command();
     let scroll_position = app.get_scroll_speed_position().round() as u8;
@@ -863,6 +865,12 @@ fn tick_clipboard(app: &App, state: &mut State) -> Result<()> {
     if !state.settings.clipboard_enabled {
         return Ok(());
     }
+    if state.settings.auto_clipboard_sync && app.get_files_connected() {
+        // SSH is authoritative while both clipboard transports are available.
+        session.take_clipboard()?;
+        state.pending_clipboard = None;
+        return Ok(());
+    }
     if let Some(text) = session.take_clipboard()? {
         state.pending_clipboard = Some((native::sequence(), text));
     }
@@ -1307,6 +1315,8 @@ pub fn run(
     app.set_fit_view(settings.fit_view);
     app.set_scroll_speed_position(f32::from(settings.scroll_speed_position));
     app.set_clipboard_shared(settings.clipboard_enabled);
+    app.set_auto_clipboard_ssh(settings.auto_clipboard_ssh);
+    app.set_auto_clipboard_sync(settings.auto_clipboard_sync);
     app.set_audio_muted(settings.audio.muted);
     app.set_audio_volume(f32::from(settings.audio.volume));
     match maccanvas::audio::codec_available() {
@@ -2114,6 +2124,7 @@ pub fn run(
             state.flush_pointer()?;
             if down
                 && app.get_clipboard_shared()
+                && !(state.settings.auto_clipboard_sync && app.get_files_connected())
                 && (event.modifiers.meta || (event.modifiers.control && app.get_ctrl_as_command()))
                 && !event.modifiers.alt
                 && matches!(event.text.as_str(), "v" | "V")
