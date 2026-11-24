@@ -19,6 +19,16 @@ pub struct ScrollScale {
 }
 
 impl ScrollScale {
+    #[cfg(target_os = "macos")]
+    pub fn system() -> Result<Self> {
+        Ok(Self {
+            horizontal: 1,
+            vertical: 1,
+            pixels_per_line: 1,
+        })
+    }
+
+    #[cfg(windows)]
     pub fn system() -> Result<Self> {
         use windows::Win32::UI::WindowsAndMessaging::{
             SPI_GETWHEELSCROLLCHARS, SPI_GETWHEELSCROLLLINES, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,

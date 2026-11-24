@@ -1,3 +1,4 @@
+#![cfg(windows)]
 use maccanvas::clipboard::native;
 use windows::{
     Win32::{

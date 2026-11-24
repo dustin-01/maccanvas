@@ -310,7 +310,7 @@ fn prepare_ssh(app: &App, state: &mut State) -> Result<()> {
 }
 
 fn start_ssh(app: &App, state: &mut State, credentials: CredentialSource) -> Result<()> {
-    if !app.get_connected() || state.updater.installing {
+    if !app.get_connected() || state.installing_update() {
         return Err(Error::Transfer(
             "Keep the Mac connection open while using SSH".into(),
         ));
@@ -362,10 +362,8 @@ fn clipboard_command(app: &App, state: &mut State, action: ClipboardAction) -> R
     let command = match action {
         ClipboardAction::Copy => Command::CopyClipboard,
         ClipboardAction::Send => {
-            let (sequence, text) =
-                native::read_snapshot(window_handle(app)?)?.ok_or_else(|| {
-                    Error::Clipboard("Windows has no plain text on the clipboard".into())
-                })?;
+            let (sequence, text) = native::read_snapshot(window_handle(app)?)?
+                .ok_or_else(|| Error::Clipboard("The local clipboard has no plain text".into()))?;
             Command::SendClipboard {
                 text: zeroize::Zeroizing::new(clipboard::normalize(&text)),
                 sequence,
@@ -627,9 +625,7 @@ pub(super) fn wire(app: &App, state: Rc<RefCell<State>>) {
                     .file_name()
                     .and_then(|name| name.to_str())
                     .ok_or_else(|| {
-                        Error::Transfer(
-                            "The Windows file name cannot be represented as UTF-8".into(),
-                        )
+                        Error::Transfer("The local file name cannot be represented as UTF-8".into())
                     })?
                     .to_owned()
             } else {
@@ -894,8 +890,9 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                     scope(&state.active.files)?.critical("clipboard.applied",Level::Info,json!({"clipboard.direction":"mac_to_windows","clipboard.text_bytes":text.len(),"network.protocol.name":"ssh"}))
                 });
                 match result {
-                    Ok(()) => app
-                        .set_files_status("Mac plain text is now on the Windows clipboard.".into()),
+                    Ok(()) => {
+                        app.set_files_status("Mac plain text is now on the local clipboard.".into())
+                    }
                     Err(error) => {
                         scope(&state.active.files)?.event(
                             "clipboard.apply_failed",
@@ -913,7 +910,7 @@ pub(super) fn tick(app: &App, state: &mut State) -> Result<()> {
                 }
                 app.set_files_busy(false);
                 app.set_files_status(
-                    "Windows plain text is now on the Mac clipboard. Paste it in your Mac app."
+                    "Local plain text is now on the remote clipboard. Paste it in your Mac app."
                         .into(),
                 );
             }

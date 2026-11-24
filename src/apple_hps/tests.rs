@@ -29,7 +29,7 @@ static PEER_TEST: Mutex<()> = Mutex::new(());
 
 const SAMPLE: &[u8] = include_bytes!(concat!(
     env!("CARGO_MANIFEST_DIR"),
-    "\\crates\\native-hevc\\tests\\data\\pattern444.hevc"
+    "/crates/native-hevc/tests/data/pattern444.hevc"
 ));
 const SAMPLE_4K: &[u8] = include_bytes!("../../crates/native-hevc/tests/data/quadrants444_4k.hevc");
 
@@ -652,6 +652,7 @@ fn encrypted_apple_peer(
     let log = std::fs::read_to_string(audit.audit().path()).unwrap();
     assert!(log.contains("media.hevc.first_frame"));
     assert!(log.contains("media.audio.first_frame"));
+    #[cfg(windows)]
     assert!(log.contains("media.audio.codec.process.closed"));
     assert!(!log.contains("FixtureOnly"));
     crate::audit::verify(&[audit.audit().path()]).unwrap();

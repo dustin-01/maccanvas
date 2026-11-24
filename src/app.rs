@@ -1,3 +1,6 @@
+#[cfg(windows)]
+use maccanvas::updates::{self, Updater};
+#[cfg(windows)]
 mod cursor_capture;
 mod desktop_events;
 mod desktops;
@@ -41,7 +44,6 @@ use maccanvas::{
     },
     telemetry::{self, Monitor},
     theme,
-    updates::{self, Updater},
 };
 
 use crate::{App, CodecGuide, Machine, SavedMac, TrafficBar};
@@ -65,6 +67,7 @@ struct AudioInstall {
 struct State {
     settings: Settings,
     path: PathBuf,
+    #[cfg(windows)]
     restart_data_directory: Option<PathBuf>,
     selected: Option<usize>,
     active: Desktop,
@@ -93,10 +96,21 @@ struct State {
     keys: HashMap<String, u32>,
     modifiers: [bool; 4],
     theme_checked: Instant,
+    #[cfg(windows)]
     updater: Updater,
 }
 
 impl State {
+    fn installing_update(&self) -> bool {
+        #[cfg(windows)]
+        {
+            self.updater.installing
+        }
+        #[cfg(target_os = "macos")]
+        {
+            false
+        }
+    }
     fn select_profile(&mut self, id: Uuid) {
         self.selected = self
             .settings
@@ -530,6 +544,10 @@ fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     }
     if changed && state.borrow().active.frame_number == 1 {
         let state = state.borrow();
+        #[cfg(windows)]
+        let gpu = state.active.gpu_frame.is_some();
+        #[cfg(target_os = "macos")]
+        let gpu = false;
         state.audit.event(
             "media.hevc.presentation.frame_ready",
             Level::Info,
@@ -537,7 +555,7 @@ fn tick_video(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
                 "media.frame.width":state.active.source_size.map(|size| size.width),
                 "media.frame.height":state.active.source_size.map(|size| size.height),
                 "media.renderer.gpu":state.gpu_renderer,
-                "media.frame.gpu":state.active.gpu_frame.is_some(),
+                "media.frame.gpu":gpu,
                 "media.draw.width":app.get_draw_width(),
                 "media.draw.height":app.get_draw_height(),
             }),
@@ -578,7 +596,10 @@ fn close_stream(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         state.active.connected = false;
         state.active.status = "Disconnected".into();
         state.active.frame = None;
-        state.active.gpu_frame = None;
+        #[cfg(windows)]
+        {
+            state.active.gpu_frame = None;
+        }
         state.active.source_size = None;
         state.active.viewport = None;
         state.active.monitor = Monitor::new(Instant::now());
@@ -643,7 +664,7 @@ fn open_desktop(
     foreground: bool,
     events: &mpsc::Sender<(u64, Event)>,
 ) -> Result<Desktop> {
-    if state.updater.installing || state.audit.audit().failure().is_some() {
+    if state.installing_update() || state.audit.audit().failure().is_some() {
         return Err(Error::Configuration(
             "Connections are currently unavailable".into(),
         ));
@@ -1055,8 +1076,12 @@ fn window_handle(app: &App) -> Result<isize> {
         .window_handle()
         .map_err(|error| Error::Consent(error.to_string()))?;
     match handle.as_raw() {
+        #[cfg(target_os = "macos")]
+        RawWindowHandle::AppKit(handle) => Ok(handle.ns_view.as_ptr() as isize),
         RawWindowHandle::Win32(handle) => Ok(handle.hwnd.get()),
-        _ => Err(Error::Consent("A native Windows window is required".into())),
+        _ => Err(Error::Consent(
+            "A native application window is required".into(),
+        )),
     }
 }
 
@@ -1148,6 +1173,7 @@ fn tick_audio(app: &App, shared: &Rc<RefCell<State>>) -> Result<()> {
     }
 }
 
+#[cfg(windows)]
 fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
     loop {
         let event = state.borrow().updater.event()?;
@@ -1217,7 +1243,7 @@ fn tick_updates(app: &App, state: &Rc<RefCell<State>>) -> Result<()> {
         }
     }
     let state = state.borrow();
-    if state.updater.installing {
+    if state.installing_update() {
         let size = state
             .updater
             .release
@@ -1293,7 +1319,10 @@ pub fn run(
     preview_update: bool,
     audit: Scope,
 ) -> Result<()> {
+    #[cfg(windows)]
     let restart_data_directory = data_directory.clone();
+    #[cfg(target_os = "macos")]
+    let _ = preview_update;
     let directory = match data_directory {
         Some(directory) => directory,
         None => profiles::default_directory()?,
@@ -1301,6 +1330,7 @@ pub fn run(
     let path = directory.join("settings.json");
     let settings = Settings::load(&path)?;
     let app = App::new().map_err(|error| Error::Display(error.to_string()))?;
+    app.set_mac_client(cfg!(target_os = "macos"));
     app.set_dark_theme(match preview_theme {
         Some(dark) => dark,
         None => theme::system_dark()?,
@@ -1335,22 +1365,26 @@ pub fn run(
     app.set_build_compiler(maccanvas::RUSTC.into());
     app.set_author_name(maccanvas::AUTHOR.into());
     app.set_log_path(audit.audit().path().to_string_lossy().as_ref().into());
+    #[cfg(windows)]
     if let Err(error) = updates::maintain_shortcuts(&audit) {
         notify(
             &app,
             format!("Could not refresh application shortcuts. {error}"),
         );
     }
+    #[cfg(windows)]
     let mut updater = Updater::new();
-    #[cfg(debug_assertions)]
+    #[cfg(all(windows, debug_assertions))]
     if preview_update {
         updater.preview_available()?;
     }
+    #[cfg(windows)]
     if preview_theme.is_none() && !(cfg!(debug_assertions) && preview_update) {
         updater.check(&audit)?;
     } else {
         app.set_update_status("Checks for updates on every launch.".into());
     }
+    #[cfg(windows)]
     app.set_update_checking(updater.checking);
     app.set_traffic(ModelRc::from(Rc::new(VecModel::from(
         vec![TrafficBar::default(); telemetry::HISTORY],
@@ -1375,6 +1409,7 @@ pub fn run(
         draft_id: Uuid::new_v4(),
         settings,
         path,
+        #[cfg(windows)]
         restart_data_directory,
         selected: None,
         retired: Vec::new(),
@@ -1397,17 +1432,24 @@ pub fn run(
         keys: HashMap::new(),
         modifiers: [false; 4],
         theme_checked: Instant::now(),
+        #[cfg(windows)]
         updater,
     }));
     let render_state = state.clone();
     let render_app = app.as_weak();
+    #[cfg(windows)]
     let mut shared_gpu: Option<maccanvas::render::gpu::interop::Interop> = None;
+    #[cfg(windows)]
     let readback_requested = !maccanvas::render::gpu::direct_sharing_enabled();
+    #[cfg(windows)]
     let mut sharing_failed = readback_requested;
+    #[cfg(windows)]
     let mut sharing_reported = false;
+    #[cfg(windows)]
     let mut fallback_image: Option<(Arc<maccanvas::render::gpu::nvdec::Frame>, slint::Image)> =
         None;
     let mut presented = None;
+    #[cfg(windows)]
     let mut render_generation = 0;
     let _ = app.window().set_rendering_notifier(move |phase, api| {
         let Some(app) = render_app.upgrade() else { return };
@@ -1418,10 +1460,17 @@ pub fn run(
                     json!({"media.renderer":if matches!(api, slint::GraphicsAPI::NativeOpenGL { .. }) { "opengl" } else { "software" }}));
             }
             slint::RenderingState::BeforeRendering => {
+                #[cfg(target_os = "macos")]
+                let (generation, number, has_frame) = {
+                    let state = render_state.borrow();
+                    (state.active.generation, state.active.frame_number, state.active.source_size.is_some())
+                };
+                #[cfg(windows)]
                 let (frame, generation, number, has_frame) = {
                     let state = render_state.borrow();
                     (state.active.gpu_frame.clone(), state.active.generation, state.active.frame_number, state.active.source_size.is_some())
                 };
+                #[cfg(windows)]
                 if generation != render_generation {
                     shared_gpu = None;
                     fallback_image = None;
@@ -1429,6 +1478,7 @@ pub fn run(
                     sharing_reported = false;
                     render_generation = generation;
                 }
+                #[cfg(windows)]
                 if let Some(frame) = frame {
                     if let slint::GraphicsAPI::NativeOpenGL { get_proc_address } = api
                         && shared_gpu.is_none() && !sharing_failed
@@ -1488,6 +1538,7 @@ pub fn run(
                 presented = has_frame.then_some((generation, number));
             }
             slint::RenderingState::AfterRendering => {
+                #[cfg(windows)]
                 if let Some(interop) = shared_gpu.as_mut() { interop.finish(); }
                 if let Some((generation, number)) = presented.take() {
                     let mut state = render_state.borrow_mut();
@@ -1501,8 +1552,8 @@ pub fn run(
                 let _ = app.as_weak().upgrade_in_event_loop(|app| {
                     app.set_frame_image(slint::Image::default());
                 });
-                shared_gpu = None;
-                fallback_image = None;
+                #[cfg(windows)]
+                { shared_gpu = None; fallback_image = None; }
                 render_state.borrow_mut().gpu_renderer = false;
             }
             _ => (),
@@ -1555,26 +1606,31 @@ pub fn run(
             Err(error) => notify(&app, error),
         }
     });
-    let weak = app.as_weak();
-    let check_state = state.clone();
-    app.on_check_updates(move || {
-        let Some(app) = weak.upgrade() else { return };
-        let mut state = check_state.borrow_mut();
-        if state.updater.release.is_some() && !state.updater.checking && !state.updater.installing {
-            app.set_update_banner(true);
-            return;
-        }
-        let audit = state.audit.clone();
-        if let Err(error) = state.updater.check(&audit) {
-            notify(&app, error);
-            return;
-        }
-        app.set_update_checking(state.updater.checking);
-        app.set_update_status("Checking the latest official release...".into());
-    });
-    let weak = app.as_weak();
-    let update_state = state.clone();
-    app.on_install_update(move || {
+    #[cfg(windows)]
+    {
+        let weak = app.as_weak();
+        let check_state = state.clone();
+        app.on_check_updates(move || {
+            let Some(app) = weak.upgrade() else { return };
+            let mut state = check_state.borrow_mut();
+            if state.updater.release.is_some()
+                && !state.updater.checking
+                && !state.installing_update()
+            {
+                app.set_update_banner(true);
+                return;
+            }
+            let audit = state.audit.clone();
+            if let Err(error) = state.updater.check(&audit) {
+                notify(&app, error);
+                return;
+            }
+            app.set_update_checking(state.updater.checking);
+            app.set_update_status("Checking the latest official release...".into());
+        });
+        let weak = app.as_weak();
+        let update_state = state.clone();
+        app.on_install_update(move || {
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = update_state.borrow_mut();
@@ -1599,12 +1655,13 @@ pub fn run(
             }
         }
     });
-    let weak = app.as_weak();
-    app.on_dismiss_update(move || {
-        if let Some(app) = weak.upgrade() {
-            app.set_update_banner(false);
-        }
-    });
+        let weak = app.as_weak();
+        app.on_dismiss_update(move || {
+            if let Some(app) = weak.upgrade() {
+                app.set_update_banner(false);
+            }
+        });
+    }
     let weak = app.as_weak();
     let about_state = state.clone();
     app.on_about_link(move |index| {
@@ -1702,7 +1759,8 @@ pub fn run(
     });
     let close_state = state.clone();
     app.window().on_close_requested(move || {
-        if close_state.borrow().updater.installing || close_state.borrow().audio_install.is_some() {
+        if close_state.borrow().installing_update() || close_state.borrow().audio_install.is_some()
+        {
             slint::CloseRequestResponse::KeepWindowShown
         } else {
             slint::CloseRequestResponse::HideWindow
@@ -1974,7 +2032,9 @@ pub fn run(
             }
         }
     });
+    #[cfg(windows)]
     let weak = app.as_weak();
+    #[cfg(windows)]
     app.on_fullscreen_pointer_y(move || {
         let Some(app) = weak.upgrade() else {
             return -1.0;
@@ -1994,6 +2054,8 @@ pub fn run(
         y as f32 / window.scale_factor()
     });
     let weak = app.as_weak();
+    #[cfg(target_os = "macos")]
+    app.on_fullscreen_pointer_y(maccanvas::macos::pointer_y);
     app.on_fullscreen_requested(move || {
         if let Some(app) = weak.upgrade() {
             let fullscreen = !app.window().is_fullscreen();
@@ -2200,13 +2262,16 @@ pub fn run(
             notify(&app, error);
         }
     });
+    #[cfg(windows)]
     let weak = app.as_weak();
+    #[cfg(windows)]
     let install_audio_state = state.clone();
+    #[cfg(windows)]
     app.on_audio_install(move || {
         let Some(app) = weak.upgrade() else { return };
         let result = (|| -> Result<()> {
             let mut state = install_audio_state.borrow_mut();
-            if state.audio_install.is_some() || state.updater.installing {
+            if state.audio_install.is_some() || state.installing_update() {
                 return Err(Error::Configuration(
                     "Wait for the current installation to finish".into(),
                 ));
@@ -2267,15 +2332,18 @@ pub fn run(
     let timer = slint::Timer::default();
     let weak = app.as_weak();
     let timer_state = state.clone();
+    #[cfg(windows)]
     let cursor_capture = cursor_capture::CursorCapture::default();
     timer.start(
         slint::TimerMode::Repeated,
         Duration::from_millis(16),
         move || {
             let Some(app) = weak.upgrade() else { return };
+            #[cfg(windows)]
             if let Err(error) = cursor_capture.sync(&app) {
                 notify(&app, error);
             }
+            #[cfg(windows)]
             if let Err(error) = tick_updates(&app, &timer_state) {
                 app.set_update_status(error.to_string().into());
                 app.set_update_banner(true);

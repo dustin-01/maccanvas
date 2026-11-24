@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeMap,
-    path::Path,
     sync::{
         Arc,
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -124,7 +123,8 @@ impl Service {
         foreground: Arc<AtomicBool>,
         counters: Arc<Counters>,
         scope: Scope,
-        converter: &Path,
+        #[cfg(windows)] converter: &std::path::Path,
+        #[cfg(target_os = "macos")] converter: &sound::Codec,
     ) -> Result<Self> {
         let (status, statuses) = mpsc::channel();
         let decoder = Decoder::start(converter, scope.clone())?;

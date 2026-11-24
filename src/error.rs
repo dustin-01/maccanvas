@@ -10,9 +10,9 @@ pub enum Error {
     ConnectionLost(String),
     #[error("Sign-in failed - {0}")]
     Authentication(String),
-    #[error("Could not access saved login details - Windows Credential Manager: {0}")]
+    #[error("Could not access saved login details - Credential store: {0}")]
     Credential(String),
-    #[error("Identity verification did not finish - Windows Hello: {0}")]
+    #[error("Identity verification did not finish - Saved login verification: {0}")]
     Consent(String),
     #[error("Could not use these settings - Settings: {0}")]
     Configuration(String),
@@ -83,7 +83,7 @@ fn sftp_reason(code: u32) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, windows))]
 mod tests {
     use super::*;
 

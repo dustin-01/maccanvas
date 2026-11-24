@@ -1,9 +1,18 @@
+#[cfg(windows)]
 pub(crate) mod windows;
+#[cfg(windows)]
+use windows as platform;
+#[cfg(target_os = "macos")]
+#[path = "audit/macos.rs"]
+mod platform;
+#[cfg(target_os = "macos")]
+use std::os::unix::fs::OpenOptionsExt;
+#[cfg(windows)]
+use std::os::windows::fs::OpenOptionsExt;
 
 use std::{
     fs::{self, OpenOptions},
     io::Write,
-    os::windows::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -70,7 +79,7 @@ struct Record {
     attributes: Value,
     timestamp: String,
     elapsed_ns: String,
-    thread_id: u32,
+    thread_id: u64,
     thread_name: Option<String>,
 }
 
@@ -94,7 +103,7 @@ fn now() -> String {
 pub fn default_directory() -> Result<PathBuf> {
     dirs::home_dir()
         .map(|path| path.join(".maccanvas"))
-        .ok_or_else(|| Error::Audit("Windows did not return a home directory".into()))
+        .ok_or_else(|| Error::Audit("Could not locate the home directory".into()))
 }
 
 fn set_failure(health: &Mutex<Option<String>>, error: &str) {
@@ -108,7 +117,7 @@ fn set_failure(health: &Mutex<Option<String>>, error: &str) {
 impl Audit {
     pub fn start(directory: PathBuf) -> Result<Guard> {
         let instance = Uuid::new_v4().simple().to_string();
-        let resource = windows::resource(&instance);
+        let resource = platform::resource(&instance);
         Self::start_with(directory, instance, resource, MAX_FILE)
     }
 
@@ -307,7 +316,18 @@ impl Scope {
             attributes,
             timestamp: now(),
             elapsed_ns: self.audit.0.started.elapsed().as_nanos().to_string(),
-            thread_id: unsafe { ::windows::Win32::System::Threading::GetCurrentThreadId() },
+            #[cfg(windows)]
+            thread_id: u64::from(unsafe {
+                ::windows::Win32::System::Threading::GetCurrentThreadId()
+            }),
+            #[cfg(target_os = "macos")]
+            thread_id: {
+                let mut id = 0;
+                unsafe {
+                    libc::pthread_threadid_np(0 as libc::pthread_t, &mut id);
+                }
+                id
+            },
             thread_name: thread::current().name().map(str::to_owned),
         });
         let (done, completion) = mpsc::sync_channel(1);
@@ -348,7 +368,7 @@ impl Scope {
 struct Store {
     directory: PathBuf,
     sid: String,
-    lock: windows::LockFile,
+    lock: platform::LockFile,
     resource: Value,
     sequence: u64,
     previous: String,
@@ -358,9 +378,9 @@ struct Store {
 impl Store {
     fn new(directory: PathBuf, resource: Value, limit: u64) -> Result<Self> {
         fs::create_dir_all(&directory)?;
-        let sid = windows::current_sid()?;
-        windows::protect(&directory, &sid, true)?;
-        let lock = windows::LockFile::open(&directory, &sid)?;
+        let sid = platform::current_sid()?;
+        platform::protect(&directory, &sid, true)?;
+        let lock = platform::LockFile::open(&directory, &sid)?;
         Ok(Self {
             directory,
             sid,
@@ -392,13 +412,13 @@ impl Store {
         let mut recovery = None;
         let size = match fs::symlink_metadata(&path) {
             Ok(metadata) => {
-                windows::reject_reparse(&path)?;
+                platform::reject_reparse(&path)?;
                 metadata.len()
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
             Err(error) => return Err(error.into()),
         };
-        if size != 0 && windows::incomplete_tail(&path)? {
+        if size != 0 && platform::incomplete_tail(&path)? {
             recovery = Some(archive(&path, "partial")?);
         }
         let mut value = json!({
@@ -442,12 +462,16 @@ impl Store {
                 "A single record exceeds the audit file-size limit".into(),
             ));
         }
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .custom_flags(::windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT.0)
-            .open(&path)?;
-        windows::protect(&path, &self.sid, false)?;
+        let mut options = OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(windows)]
+        options.custom_flags(::windows::Win32::Storage::FileSystem::FILE_FLAG_OPEN_REPARSE_POINT.0);
+        #[cfg(target_os = "macos")]
+        options
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        let mut file = options.open(&path)?;
+        platform::protect(&path, &self.sid, false)?;
         file.write_all(&line)?;
         file.sync_all()?;
         self.sequence += 1;
@@ -498,10 +522,10 @@ fn prune(directory: &Path, sid: &str) -> Result<Vec<String>> {
                     && chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%S%.9fZ").is_ok()
             });
         if owned {
-            windows::reject_reparse(&entry.path())?;
+            platform::reject_reparse(&entry.path())?;
             let metadata = entry.metadata()?;
             if metadata.is_file() {
-                windows::protect(&entry.path(), sid, false)?;
+                platform::protect(&entry.path(), sid, false)?;
                 files.push((metadata.modified()?, name, entry.path()));
             }
         }
@@ -577,7 +601,13 @@ pub fn error_type(error: &Error) -> &'static str {
         Error::ConnectionLost(_) => "connection_interrupted",
         Error::Authentication(_) => "authentication",
         Error::Credential(_) => "credential_vault",
-        Error::Consent(_) => "windows_hello",
+        Error::Consent(_) => {
+            if cfg!(windows) {
+                "windows_hello"
+            } else {
+                "local_authentication"
+            }
+        }
         Error::Configuration(_) => "configuration",
         Error::Display(_) => "display",
         Error::Audio { .. } => "audio",
@@ -868,13 +898,17 @@ mod tests {
 
     #[test]
     fn own_process_evidence_has_parent_and_identity_without_command_lines() {
-        let resource = windows::resource("test-instance");
+        let resource = platform::resource("test-instance");
         assert_eq!(resource["process.pid"], std::process::id());
         assert!(resource["process.parent_pid"].as_u64().is_some());
         assert!(
             resource["user.id"]
                 .as_str()
-                .is_some_and(|sid| sid.starts_with("S-1-"))
+                .is_some_and(|id| if cfg!(windows) {
+                    id.starts_with("S-1-")
+                } else {
+                    id.parse::<u32>().is_ok()
+                })
         );
         assert!(
             resource["process.executable.hash.sha256"]

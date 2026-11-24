@@ -1,5 +1,6 @@
 use crate::{DecodedFrame, Error, Result, ffi, validate_dimensions};
 
+#[cfg(target_arch = "x86_64")]
 mod sse2;
 
 struct Plane<'a> {
@@ -99,9 +100,12 @@ pub fn copy_frame(image: &ffi::Image) -> Result<DecodedFrame> {
 }
 
 fn convert_row(y: &[u8], cb: &[u8], cr: &[u8], rgba: &mut [u8], shift: usize, matrix: &Matrix) {
+    #[cfg(target_arch = "x86_64")]
     if shift == 0 && matrix.y_offset == 0 {
         sse2::full_range_444(y, cb, cr, rgba);
-    } else {
+        return;
+    }
+    {
         for (column, pixel) in rgba.chunks_exact_mut(4).enumerate() {
             pixel.copy_from_slice(&matrix.pixel(
                 y[column],
@@ -187,6 +191,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn sse2_matches_scalar_and_reference_for_all_chroma_pairs() {
         let cr: Vec<u8> = (0..=255).collect();
         let matrix = Matrix::new(true);
@@ -205,6 +210,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_arch = "x86_64")]
     fn sse2_handles_unaligned_rows_scalar_tails_and_exact_output_bounds() {
         for width in [
             1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65, 1919, 1920, 8191, 8192,

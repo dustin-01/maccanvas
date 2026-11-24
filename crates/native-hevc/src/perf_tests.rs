@@ -2,7 +2,7 @@ use std::{hint::black_box, time::Instant};
 
 use crate::{Decoder, annex_b, check_native, color, ffi};
 
-const FOUR_K: &[u8] = include_bytes!(r"..\tests\data\quadrants444_4k.hevc");
+const FOUR_K: &[u8] = include_bytes!("../tests/data/quadrants444_4k.hevc");
 
 fn milliseconds(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0

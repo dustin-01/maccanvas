@@ -16,9 +16,7 @@ use crate::{
 pub fn default_directory() -> Result<PathBuf> {
     dirs::data_local_dir()
         .map(|directory| directory.join("MacCanvas"))
-        .ok_or_else(|| {
-            Error::Configuration("Windows did not return a local app-data folder".into())
-        })
+        .ok_or_else(|| Error::Configuration("Cannot locate the application data folder".into()))
 }
 
 #[derive(Clone, Copy, Default, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +160,7 @@ impl Default for Settings {
             version: 1,
             profiles: Vec::new(),
             recent_macs: Vec::new(),
-            ctrl_as_command: true,
+            ctrl_as_command: cfg!(windows),
             scroll_speed_position: normal_scroll_position(),
             capture_cursor_fullscreen: false,
             require_windows_hello: true,

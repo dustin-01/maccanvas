@@ -1,3 +1,4 @@
+#[cfg(windows)]
 use windows::{
     Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     core::{HSTRING, PCWSTR, w},
@@ -14,7 +15,7 @@ pub fn open_about_link(index: i32) -> Result<()> {
         4 => "https://github.com/false00/maccanvas/blob/main/LICENSE",
         _ => return Err(Error::Configuration("Unknown About link".into())),
     };
-    open(&HSTRING::from(link))
+    open(link.as_ref())
 }
 
 pub fn open_directory(path: &std::path::Path) -> Result<()> {
@@ -23,15 +24,32 @@ pub fn open_directory(path: &std::path::Path) -> Result<()> {
             "The requested log directory does not exist".into(),
         ));
     }
-    open(&HSTRING::from(path.as_os_str()))
+    open(path.as_os_str())
 }
 
-fn open(target: &HSTRING) -> Result<()> {
+#[cfg(target_os = "macos")]
+fn open(target: &std::ffi::OsStr) -> Result<()> {
+    if std::process::Command::new("/usr/bin/open")
+        .arg(target)
+        .status()?
+        .success()
+    {
+        Ok(())
+    } else {
+        Err(Error::Configuration(
+            "macOS could not open this item".into(),
+        ))
+    }
+}
+
+#[cfg(windows)]
+fn open(target: &std::ffi::OsStr) -> Result<()> {
+    let target = HSTRING::from(target);
     let result = unsafe {
         ShellExecuteW(
             None,
             w!("open"),
-            target,
+            &target,
             PCWSTR::null(),
             PCWSTR::null(),
             SW_SHOWNORMAL,

@@ -1,4 +1,6 @@
+#[cfg_attr(target_os = "macos", path = "clipboard/macos.rs")]
 pub mod native;
+mod watcher;
 
 use std::io::{Read, Write};
 

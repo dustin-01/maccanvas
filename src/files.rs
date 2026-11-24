@@ -35,6 +35,7 @@ use crate::{
     telemetry::{Counters, Metered},
 };
 
+#[cfg_attr(target_os = "macos", path = "files/dialog_macos.rs")]
 pub mod dialog;
 
 const CHUNK: usize = 32 * 1024;

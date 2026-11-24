@@ -1,4 +1,4 @@
-name: Windows checks
+name: Viewer checks
 
 on:
   push:
@@ -9,10 +9,16 @@ permissions:
   contents: read
 
 jobs:
-  mac-clipboard:
+  macos:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - name: Build and verify the macOS app
+        run: python3 scripts/build_macos.py
+      - name: Test Mac connection and native video decoding
+        run: |
+          cargo test --locked --test mac_connection
+          cargo test --locked -p native-hevc --test decode
       - name: Verify the native macOS Unicode clipboard helpers
         run: python3 scripts/test_macos_clipboard.py
       - name: Verify native Apple audio conformance encoding

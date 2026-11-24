@@ -5,6 +5,7 @@ export component AudioOverlay inherits Rectangle {
     in property <bool> supported;
     in property <bool> connected;
     in property <bool> missing;
+    in property <bool> mac-client;
     in property <bool> installing;
     in property <string> status;
     in-out property <bool> muted;
@@ -30,7 +31,7 @@ export component AudioOverlay inherits Rectangle {
                     Button { text: "Done"; clicked => { root.close(); } }
                 }
                 Text { text: root.connected && !root.supported ? "Standard VNC does not carry audio. Choose HEVC / H.265 in Quality to hear your Mac." : root.status; color: GlassTheme.accent; font-size: 13px; wrap: word-wrap; }
-                if root.missing || root.installing : VerticalLayout {
+                if !root.mac-client && (root.missing || root.installing) : VerticalLayout {
                     spacing: 12px;
                     Text { text: "Audio uses an optional, separately licensed AAC converter. Enabling audio downloads and verifies it from the official release. No system codec extension is installed."; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
                     Button { text: root.installing ? "Downloading audio..." : "Enable audio"; primary: true; enabled: !root.installing; clicked => { root.install(); } }
@@ -41,7 +42,7 @@ export component AudioOverlay inherits Rectangle {
                     Slider { accessible-label: "Audio volume"; minimum: 0; maximum: 100; step: 1; value <=> root.volume; enabled: !root.connected || root.supported; changed => { root.changed(); } }
                     Text { text: round(root.volume) + "%"; color: GlassTheme.muted; font-size: 12px; vertical-alignment: center; min-width: 40px; }
                 }
-                Text { text: "Playback follows your Windows output device. These controls do not change the Mac's volume. No microphone audio is captured or sent."; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
+                Text { text: "Playback follows your local output device. These controls do not change the Mac's volume. No microphone audio is captured or sent."; color: GlassTheme.muted; font-size: 12px; wrap: word-wrap; }
                 if root.connected && root.supported && !root.missing : Button { text: "Retry audio"; enabled: !root.installing; clicked => { root.retry(); } }
                 Text { text: "Enabling or retrying audio reconnects an active HEVC stream automatically."; color: GlassTheme.muted; font-size: 11px; wrap: word-wrap; }
             }

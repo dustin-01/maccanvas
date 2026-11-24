@@ -1,3 +1,9 @@
+#[cfg(not(windows))]
+fn main() {
+    eprintln!("The Windows update probe runs on Windows.");
+}
+
+#[cfg(windows)]
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let argument = std::env::args_os()
         .nth(1)

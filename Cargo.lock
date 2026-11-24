@@ -3216,6 +3216,7 @@ dependencies = [
  "getrandom 0.3.4",
  "hmac 0.12.1",
  "jpeg-encoder",
+ "libc",
  "md-5",
  "native-hevc",
  "plist",

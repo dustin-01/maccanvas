@@ -1,9 +1,9 @@
 use native_hevc::{DecodedFrame, Decoder, Error, MAX_INPUT_BYTES};
 
-const REXT_444: &[u8] = include_bytes!(r"data\pattern444.hevc");
-const REXT_444_4K: &[u8] = include_bytes!(r"data\quadrants444_4k.hevc");
-const MAIN_420: &[u8] = include_bytes!(r"data\pattern420.hevc");
-const CROPPED_420: &[u8] = include_bytes!(r"data\cropped420.hevc");
+const REXT_444: &[u8] = include_bytes!("data/pattern444.hevc");
+const REXT_444_4K: &[u8] = include_bytes!("data/quadrants444_4k.hevc");
+const MAIN_420: &[u8] = include_bytes!("data/pattern420.hevc");
+const CROPPED_420: &[u8] = include_bytes!("data/cropped420.hevc");
 
 fn nals(stream: &[u8]) -> Vec<&[u8]> {
     let starts: Vec<usize> = stream

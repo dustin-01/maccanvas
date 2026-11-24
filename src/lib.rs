@@ -20,11 +20,15 @@ pub mod framebuffer;
 pub mod geometry;
 pub mod input;
 pub mod links;
+#[cfg(target_os = "macos")]
+pub mod macos;
 pub mod profiles;
 pub mod protocol;
 pub mod render;
 pub mod session;
 pub mod streaming;
 pub mod telemetry;
+#[cfg_attr(target_os = "macos", path = "theme_macos.rs")]
 pub mod theme;
+#[cfg(windows)]
 pub mod updates;

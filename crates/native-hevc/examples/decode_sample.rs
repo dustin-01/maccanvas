@@ -2,7 +2,7 @@ use native_hevc::Decoder;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut decoder = Decoder::new()?;
-    let mut frames = decoder.push(include_bytes!(r"..\tests\data\pattern444.hevc"), 12345)?;
+    let mut frames = decoder.push(include_bytes!("../tests/data/pattern444.hevc"), 12345)?;
     frames.extend(decoder.flush()?);
     if frames.len() != 1 {
         return Err("expected exactly one decoded sample picture".into());

@@ -1,6 +1,31 @@
 fn main() {
     build_metadata();
     build_gpu();
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        let icon =
+            std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap()).join("MacCanvas.png");
+        let (_, png) = render_icons(&[1024]).pop().unwrap();
+        std::fs::write(icon, png).expect("Can write macOS app icon");
+        println!("cargo:rerun-if-changed=native/macos.m");
+        println!("cargo:rerun-if-changed=native/macos_audio.c");
+        cc::Build::new()
+            .file("native/macos.m")
+            .flag("-fobjc-arc")
+            .compile("maccanvas_appkit");
+        cc::Build::new()
+            .file("native/macos_audio.c")
+            .compile("maccanvas_audio");
+        for framework in [
+            "AppKit",
+            "Security",
+            "LocalAuthentication",
+            "AudioToolbox",
+            "AudioUnit",
+            "CoreAudio",
+        ] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+    }
     println!("cargo:rerun-if-changed=assets/logo.svg");
     slint_build::compile_with_config(
         "ui/app.slint",
@@ -154,15 +179,14 @@ fn main() {
         }
     }
 
-    fn generate_icon() -> std::path::PathBuf {
-        use std::io::Write;
+    fn render_icons(sizes: &[u32]) -> Vec<(u32, Vec<u8>)> {
         let tree = resvg::usvg::Tree::from_data(
             include_bytes!("assets/logo.svg"),
             &resvg::usvg::Options::default(),
         )
         .expect("Logo SVG is valid");
         let mut images = Vec::new();
-        for size in [16u32, 24, 32, 48, 64, 128, 256] {
+        for &size in sizes {
             let mut pixels =
                 resvg::tiny_skia::Pixmap::new(size, size).expect("Icon dimensions are valid");
             resvg::render(
@@ -175,6 +199,12 @@ fn main() {
                 pixels.encode_png().expect("Icon PNG encoding succeeds"),
             ));
         }
+        images
+    }
+
+    fn generate_icon() -> std::path::PathBuf {
+        use std::io::Write;
+        let images = render_icons(&[16, 24, 32, 48, 64, 128, 256]);
         let path =
             std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR"))
                 .join("maccanvas.ico");

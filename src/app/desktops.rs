@@ -20,6 +20,7 @@ pub(super) struct Desktop {
     pub cursor: Option<(cursor::Update, f32)>,
     pub frames: Frames,
     pub frame: Option<Arc<Framebuffer>>,
+    #[cfg(windows)]
     pub gpu_frame: Option<Arc<maccanvas::render::gpu::nvdec::Frame>>,
     pub source_size: Option<Extent>,
     pub viewport: Option<Viewport>,
@@ -59,6 +60,7 @@ impl Desktop {
             cursor: None,
             frames: Default::default(),
             frame: None,
+            #[cfg(windows)]
             gpu_frame: None,
             source_size: None,
             viewport: None,
@@ -78,6 +80,9 @@ impl Desktop {
     /// Drain only the latest frame from each single-slot mailbox. The foreground
     /// does this on presentation, while previews sample at a much lower rate.
     pub fn receive_frame(&mut self, software: bool) -> Result<bool> {
+        #[cfg(target_os = "macos")]
+        let _ = software;
+        #[cfg(windows)]
         let gpu = self
             .session
             .as_ref()
@@ -92,22 +97,31 @@ impl Desktop {
         if let Some(cpu) = cpu {
             self.source_size = Some(cpu.size);
             self.frame = Some(cpu);
-            self.gpu_frame = None;
-        } else if let Some(gpu) = gpu {
-            let size = gpu.size;
-            if software {
-                self.frame = Some(Arc::new(Framebuffer {
-                    size,
-                    rgba: gpu.read_rgba()?,
-                }));
+            #[cfg(windows)]
+            {
                 self.gpu_frame = None;
-            } else {
-                self.frame = None;
-                self.gpu_frame = Some(gpu);
             }
-            self.source_size = Some(size);
         } else {
+            #[cfg(target_os = "macos")]
             return Ok(false);
+            #[cfg(windows)]
+            {
+                let Some(gpu) = gpu else {
+                    return Ok(false);
+                };
+                let size = gpu.size;
+                if software {
+                    self.frame = Some(Arc::new(Framebuffer {
+                        size,
+                        rgba: gpu.read_rgba()?,
+                    }));
+                    self.gpu_frame = None;
+                } else {
+                    self.frame = None;
+                    self.gpu_frame = Some(gpu);
+                }
+                self.source_size = Some(size);
+            }
         }
         self.frame_number += 1;
         Ok(true)
@@ -117,14 +131,21 @@ impl Desktop {
         let Some(size) = self.source_size else {
             return Ok(());
         };
+        #[cfg(windows)]
         let readback;
         let rgba = if let Some(frame) = &self.frame {
             &frame.rgba[..]
-        } else if let Some(gpu) = &self.gpu_frame {
-            readback = gpu.read_rgba()?;
-            &readback[..]
         } else {
+            #[cfg(target_os = "macos")]
             return Ok(());
+            #[cfg(windows)]
+            {
+                let Some(gpu) = &self.gpu_frame else {
+                    return Ok(());
+                };
+                readback = gpu.read_rgba()?;
+                &readback[..]
+            }
         };
         let scale = (224.0 / f64::from(size.width))
             .min(144.0 / f64::from(size.height))
@@ -260,13 +281,20 @@ pub fn activate(app: &App, state: &Rc<RefCell<State>>, id: Uuid) -> Result<()> {
             state.active.error = error.to_string();
         }
         // Direct GPU textures are owned by the outgoing rendering context.
-        outgoing = if state.active.gpu_frame.is_some()
-            && maccanvas::render::gpu::direct_sharing_enabled()
+        #[cfg(target_os = "macos")]
         {
-            state.active.thumbnail.clone()
-        } else {
-            app.get_frame_image()
-        };
+            outgoing = app.get_frame_image();
+        }
+        #[cfg(windows)]
+        {
+            outgoing = if state.active.gpu_frame.is_some()
+                && maccanvas::render::gpu::direct_sharing_enabled()
+            {
+                state.active.thumbnail.clone()
+            } else {
+                app.get_frame_image()
+            };
+        }
         animate =
             state.active.source_size.is_some() && state.background[index].source_size.is_some();
         app.set_previous_screen_width(app.get_draw_width());
@@ -361,11 +389,7 @@ pub fn disconnect_machine(app: &App, shared: &Rc<RefCell<State>>, id: Uuid) -> R
         drop(state);
         return disconnect(app, shared);
     }
-    if let Some(i) = state
-        .background
-        .iter()
-        .position(|d| d.id() == Some(id))
-    {
+    if let Some(i) = state.background.iter().position(|d| d.id() == Some(id)) {
         let mut desktop = state.background.remove(i);
         let closed = if let Some(session) = desktop.session.take() {
             let record =

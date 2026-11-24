@@ -1,4 +1,4 @@
-#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 slint::include_modules!();
 mod app;
@@ -22,6 +22,15 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Ok(());
             }
+            #[cfg(target_os = "macos")]
+            "--audio-component-info" => {
+                println!(
+                    "{}",
+                    serde_json::json!({"backend":"AudioToolbox", "available": maccanvas::audio::codec_available().is_ok()})
+                );
+                return Ok(());
+            }
+            #[cfg(windows)]
             "--audio-component-info" => {
                 println!(
                     "{}",
@@ -32,6 +41,15 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
                 );
                 return Ok(());
             }
+            #[cfg(target_os = "macos")]
+            "--video-info" => {
+                println!(
+                    "{}",
+                    serde_json::json!({"decoder":"libde265", "target":maccanvas::TARGET})
+                );
+                return Ok(());
+            }
+            #[cfg(windows)]
             "--video-info" => {
                 println!(
                     "{}",
@@ -52,7 +70,7 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
             }
             "--help" | "-h" => {
                 println!(
-                    "MacCanvas {}\n\nUsage: maccanvas.exe [--data-dir DIRECTORY]\n       maccanvas.exe --version\n       maccanvas.exe --licenses\n       maccanvas.exe --audio-component-info\n       maccanvas.exe --video-info\n       maccanvas.exe --verify-log FILE [FILE...]\n\nPasswords are entered in the window, never on the command line.",
+                    "MacCanvas {}\n\nUsage: maccanvas [--data-dir DIRECTORY]\n       maccanvas --version\n       maccanvas --licenses\n       maccanvas --audio-component-info\n       maccanvas --video-info\n       maccanvas --verify-log FILE [FILE...]\n\nPasswords are entered in the window, never on the command line.",
                     maccanvas::VERSION
                 );
                 return Ok(());
@@ -77,16 +95,22 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(directory) = &data_directory {
         let standard = maccanvas::profiles::default_directory()?;
-        let directory = std::path::absolute(directory)?
+        let directory = std::path::absolute(directory)?;
+        let standard = std::path::absolute(standard)?;
+        #[cfg(windows)]
+        let same = directory
             .to_string_lossy()
-            .replace('/', "\\");
-        let standard = std::path::absolute(standard)?
-            .to_string_lossy()
-            .replace('/', "\\");
-        if directory
+            .replace('/', "\\")
             .trim_end_matches('\\')
-            .eq_ignore_ascii_case(standard.trim_end_matches('\\'))
-        {
+            .eq_ignore_ascii_case(
+                standard
+                    .to_string_lossy()
+                    .replace('/', "\\")
+                    .trim_end_matches('\\'),
+            );
+        #[cfg(target_os = "macos")]
+        let same = directory == standard;
+        if same {
             data_directory = None;
         }
     }
@@ -129,6 +153,7 @@ fn start() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn main() {
+    #[cfg(windows)]
     let terminal = std::env::args().skip(1).any(|argument| {
         matches!(
             argument.as_str(),
@@ -142,6 +167,7 @@ fn main() {
     });
     if let Err(error) = start() {
         eprintln!("MacCanvas: {error}");
+        #[cfg(windows)]
         if !terminal {
             unsafe {
                 use windows::{

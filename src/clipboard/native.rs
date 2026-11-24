@@ -109,7 +109,11 @@ pub fn write(owner: isize, text: &str) -> Result<()> {
     write_if_current(owner, text, None).map(|_| ())
 }
 
-fn write_if_current(owner: isize, text: &str, expected: Option<u32>) -> Result<Option<u32>> {
+pub(super) fn write_if_current(
+    owner: isize,
+    text: &str,
+    expected: Option<u32>,
+) -> Result<Option<u32>> {
     super::validate(text, true)?;
     let text = Zeroizing::new(super::normalize(text).replace('\n', "\r\n"));
     let units = Zeroizing::new(text.encode_utf16().chain(Some(0)).collect::<Vec<_>>());
@@ -149,46 +153,4 @@ fn write_if_current(owner: isize, text: &str, expected: Option<u32>) -> Result<O
     result
 }
 
-#[derive(Default)]
-pub struct Watcher {
-    sent: Option<u32>,
-    remote: Option<u32>,
-}
-
-impl Watcher {
-    pub fn paste(&self, owner: isize) -> Result<Option<(u32, Zeroizing<String>)>> {
-        let sequence = sequence();
-        if self.remote == Some(sequence) || self.sent == Some(sequence) {
-            return Ok(None);
-        }
-        read_snapshot(owner)?.map(Some).ok_or_else(|| {
-            Error::Clipboard(
-                "Only plain-text clipboard sharing is supported; nothing was pasted".into(),
-            )
-        })
-    }
-
-    pub fn sent(&mut self, sequence: u32) {
-        self.sent = Some(sequence);
-    }
-
-    pub fn receive_if_current(
-        &mut self,
-        owner: isize,
-        text: &str,
-        expected: u32,
-    ) -> Result<Option<u32>> {
-        let applied = write_if_current(owner, text, Some(expected))?;
-        if applied.is_some() {
-            self.remote = applied;
-        }
-        Ok(applied)
-    }
-
-    pub fn receive(&mut self, owner: isize, text: &str) -> Result<()> {
-        write(owner, text)?;
-        let sequence = sequence();
-        self.remote = Some(sequence);
-        Ok(())
-    }
-}
+pub use super::watcher::Watcher;

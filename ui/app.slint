@@ -110,7 +110,8 @@ export component App inherits Window {
     preferred-height: 820px;
     min-width: 820px;
     min-height: 560px;
-    default-font-family: "Segoe UI";
+    in property <bool> mac-client;
+    default-font-family: mac-client ? "Helvetica Neue" : "Segoe UI";
     default-font-size: 14px;
 
     in-out property <string> machine-name;
@@ -423,13 +424,13 @@ export component App inherits Window {
                 Button { icon: @image-url("../assets/audio.svg"); accessible-label: "Audio playback"; quiet: root.audio-muted; clicked => { root.audio-open = true; root.release-input(); } }
                 Button {
                     text: root.compact-toolbar ? "" : "Copy Mac"; icon: @image-url("../assets/clipboard-from-mac.svg");
-                    accessible-label: "Copy Mac text to Windows clipboard";
+                    accessible-label: root.mac-client ? "Copy remote text to local clipboard" : "Copy Mac text to Windows clipboard";
                     enabled: root.connected && !root.files-busy && !root.files-connecting && !root.files-key-pending;
                     clicked => { root.files-copy-text(); }
                 }
                 Button {
-                    text: root.compact-toolbar ? "" : "Send Windows"; icon: @image-url("../assets/clipboard-to-mac.svg");
-                    accessible-label: "Send Windows text to Mac clipboard";
+                    text: root.compact-toolbar ? "" : (root.mac-client ? "Send local" : "Send Windows"); icon: @image-url("../assets/clipboard-to-mac.svg");
+                    accessible-label: root.mac-client ? "Send local text to remote clipboard" : "Send Windows text to Mac clipboard";
                     enabled: root.connected && !root.files-busy && !root.files-connecting && !root.files-key-pending;
                     clicked => { root.files-send-text(); }
                 }
@@ -501,7 +502,7 @@ export component App inherits Window {
                                             }
                                         }
                                         HorizontalLayout {
-                                            Text { text: machine.saved ? (root.require-windows-hello ? "Hello protected" : "Saved login") : "Manual sign-in"; color: root.muted; font-size: 11px; min-width: 0px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
+                                            Text { text: machine.saved ? (root.require-windows-hello ? (root.mac-client ? "Protected login" : "Hello protected") : "Saved login") : "Manual sign-in"; color: root.muted; font-size: 11px; min-width: 0px; overflow: elide; vertical-alignment: center; horizontal-stretch: 1; }
                                             Button { text: "Details"; quiet: true; clicked => { root.select-machine(index); } }
                                             Button {
                                                 text: machine.connected ? "Disconnect" : (machine.connecting ? "Connecting…" : "Connect");
@@ -538,7 +539,7 @@ export component App inherits Window {
                                     VerticalLayout {
                                         padding: 12px; spacing: 6px;
                                         Caption { text: root.require-windows-hello ? "Saved login is locked" : "Saved login"; color: root.accent; }
-                                        Text { text: root.require-windows-hello ? "Approve Windows Hello to use this saved login." : "Connect using the password in Windows Credential Manager."; color: root.ink; font-size: 12px; wrap: word-wrap; }
+                                        Text { text: root.require-windows-hello ? (root.mac-client ? "Verify your identity to use the saved Keychain login." : "Approve Windows Hello to use this saved login.") : (root.mac-client ? "Connect using the password in Keychain." : "Connect using the password in Windows Credential Manager."); color: root.ink; font-size: 12px; wrap: word-wrap; }
                                         DetailsButton {
                                             text: "Enter different credentials";
                                             enabled: !root.selected-busy;
@@ -556,7 +557,7 @@ export component App inherits Window {
                                     Caption { text: "Password"; }
                                     LineEdit { accessible-label: "Mac password"; text <=> root.password; input-type: InputType.password; placeholder-text: "Enter a password"; enabled: !root.selected-busy; }
                                     CheckBox {
-                                        text: root.has-saved ? "Replace saved login after connecting" : "Save login in Credential Manager";
+                                        text: root.has-saved ? "Replace saved login after connecting" : (root.mac-client ? "Save login in Keychain" : "Save login in Credential Manager");
                                         checked <=> root.remember-password; enabled: !root.selected-busy;
                                     }
                                     if root.has-saved : DetailsButton {
@@ -799,7 +800,7 @@ export component App inherits Window {
                                 CheckBox { text: "Automatically sync clipboard contents"; checked <=> root.auto-clipboard-sync; toggled => { root.save-preferences(); } }
                                 Text { text: "Share copied plain text with the Mac you are viewing over SSH."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                                 CheckBox { text: "Ctrl shortcuts act as Command"; checked <=> root.ctrl-as-command; toggled => { root.save-preferences(); } }
-                                CheckBox { text: "Capture cursor on fullscreen"; checked <=> root.capture-cursor-fullscreen; toggled => { root.save-preferences(); } }
+                                if !root.mac-client : CheckBox { text: "Capture cursor on fullscreen"; checked <=> root.capture-cursor-fullscreen; toggled => { root.save-preferences(); } }
                                 VerticalLayout {
                                     spacing: 2px;
                                     Caption { text: "Mouse scroll speed  " + (round(root.scroll-multiplier * 100) / 100) + "×"; }
@@ -815,20 +816,20 @@ export component App inherits Window {
                                         Text { text: "10×"; width: 33.33%; horizontal-alignment: right; color: root.muted; font-size: 11px; }
                                     }
                                 }
-                                CheckBox { text: "Require Windows Hello for saved logins"; checked <=> root.require-windows-hello; toggled => { root.save-preferences(); } }
-                                Text { text: "With Hello off, anyone using your unlocked Windows session can connect to your saved Macs."; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                                CheckBox { text: root.mac-client ? "Require Touch ID or Mac password for saved logins" : "Require Windows Hello for saved logins"; checked <=> root.require-windows-hello; toggled => { root.save-preferences(); } }
+                                Text { text: "When verification is off, anyone using your unlocked computer can connect to your saved Macs."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                                 Text { text: "Use a VPN for remote access. Standard Mac VNC traffic is not encrypted."; color: root.muted; font-size: 11px; wrap: word-wrap; }
                                 Rectangle { height: 1px; background: root.outline; }
                                 HorizontalLayout {
                                     Text { text: "MacCanvas " + root.app-version; color: root.muted; font-size: 11px; vertical-alignment: center; }
-                                    Button {
+                                    if !root.mac-client : Button {
                                         text: root.update-checking ? "Checking..." : (root.update-available ? "Update" : "Check updates");
                                         accessible-label: "Check for updates";
                                         enabled: !root.update-checking && !root.update-installing && !root.update-restart-required;
                                         clicked => { root.settings-open = false; root.check-updates(); }
                                     }
                                 }
-                                Text { accessible-label: "Update status: " + root.update-status; text: root.update-status; color: root.muted; font-size: 11px; wrap: word-wrap; }
+                                if !root.mac-client : Text { accessible-label: "Update status: " + root.update-status; text: root.update-status; color: root.muted; font-size: 11px; wrap: word-wrap; }
                             }
                         }
                     }
@@ -943,6 +944,7 @@ export component App inherits Window {
     audio-popup := PopupTransition {
         open: root.audio-open;
         if audio-popup.visible : AudioOverlay {
+            mac-client: root.mac-client;
             reveal: audio-popup.progress;
             supported: root.hevc-active; connected: root.connected; missing: root.audio-codec-missing;
             installing: root.audio-installing; status: root.audio-status;
@@ -968,6 +970,7 @@ export component App inherits Window {
     clipboard-popup := PopupTransition {
         open: root.clipboard-open;
         if clipboard-popup.visible : ClipboardOverlay {
+            mac-client: root.mac-client;
             reveal: clipboard-popup.progress;
             shared <=> root.clipboard-shared; mode: root.clipboard-mode; vnc-available: !root.hevc-active;
             host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
@@ -990,6 +993,7 @@ export component App inherits Window {
     files-popup := PopupTransition {
         open: root.files-open;
         if files-popup.visible : FilesOverlay {
+            mac-client: root.mac-client;
             reveal: files-popup.progress;
             host: root.files-host; port <=> root.files-port; username <=> root.files-username; password <=> root.files-password;
             has-saved: root.files-has-saved; use-saved <=> root.files-use-saved; connected: root.files-connected;

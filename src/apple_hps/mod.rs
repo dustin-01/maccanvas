@@ -13,7 +13,6 @@ mod udp;
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     net::TcpStream,
-    path::PathBuf,
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -47,6 +46,7 @@ pub const COUNTER_ENCODING: i32 = -26_500;
 
 pub enum Frame {
     Software(Framebuffer),
+    #[cfg(windows)]
     Gpu(Arc<crate::render::gpu::nvdec::Frame>),
 }
 
@@ -54,6 +54,7 @@ impl Frame {
     pub fn size(&self) -> Extent {
         match self {
             Self::Software(frame) => frame.size,
+            #[cfg(windows)]
             Self::Gpu(frame) => frame.size,
         }
     }
@@ -130,7 +131,7 @@ pub struct Client {
     audio_pending: VecDeque<AudioStatus>,
     audio_settings: AudioSettings,
     foreground: Arc<AtomicBool>,
-    converter: Option<PathBuf>,
+    converter: Option<crate::audio::Codec>,
     channel: Channel,
     control_socket: Arc<PeerSocket>,
     video_socket: Arc<PeerSocket>,
@@ -140,6 +141,7 @@ pub struct Client {
     feedback: Srtcp,
     heartbeat: SrtpSender,
     decoder: native_hevc::Decoder,
+    #[cfg(windows)]
     hardware: Option<crate::render::gpu::Decoder>,
     assembler: Assembler,
     counters: Arc<Counters>,
@@ -206,6 +208,8 @@ impl Client {
         prefer_hardware: bool,
         foreground: Arc<AtomicBool>,
     ) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        let _ = prefer_hardware;
         settings.validate()?;
         if !settings.encoding.is_hevc() {
             return Err(failed("choose an HEVC streaming preset"));
@@ -315,7 +319,9 @@ impl Client {
         let feedback = Srtcp::new(&offers.video_send);
         let heartbeat = SrtpSender::new(&offers.audio_send, offers.audio_ssrc);
         let decoder = native_hevc::Decoder::new().map_err(failed)?;
+        #[cfg(windows)]
         let mut hardware = None;
+        #[cfg(windows)]
         if prefer_hardware && crate::render::gpu::hardware_enabled()? {
             match crate::render::gpu::candidates() {
                 Ok(candidates) => {
@@ -356,6 +362,7 @@ impl Client {
             feedback,
             heartbeat,
             decoder,
+            #[cfg(windows)]
             hardware,
             assembler: Assembler::new(),
             counters,
@@ -517,6 +524,7 @@ impl Client {
             json!({"media.recovery.reason":reason}),
         )?;
         self.decoder = native_hevc::Decoder::new().map_err(failed)?;
+        #[cfg(windows)]
         if let Some(hardware) = self.hardware.as_mut()
             && let Err(error) = hardware.reset()
         {
@@ -603,6 +611,7 @@ impl Client {
     }
 
     fn decode_video(&mut self, unit: &rtp::Unit) -> Result<Vec<Frame>> {
+        #[cfg(windows)]
         if let Some(hardware) = self.hardware.as_mut() {
             match hardware.push(&unit.annex_b, unit.timestamp) {
                 Ok(frames) => return Ok(frames.into_iter().map(Frame::Gpu).collect()),
@@ -854,6 +863,7 @@ impl Client {
                         self.counters
                             .encoding
                             .store(COUNTER_ENCODING, Ordering::Relaxed);
+                        #[cfg(windows)]
                         self.counters.decoder.store(
                             if matches!(&frame, Frame::Gpu(_)) {
                                 self.hardware

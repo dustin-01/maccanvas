@@ -11,6 +11,7 @@ use fast_image_resize::{
     images::{Image, ImageRef},
 };
 
+#[cfg(windows)]
 pub mod gpu;
 mod pacing;
 

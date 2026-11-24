@@ -1,4 +1,6 @@
+#[cfg_attr(target_os = "macos", path = "audio/codec_macos.rs")]
 mod codec;
+#[cfg_attr(target_os = "macos", path = "audio/playback_macos.rs")]
 mod playback;
 
 use std::{
@@ -19,8 +21,14 @@ use crate::{
     error::{Error, Result},
 };
 
+pub use codec::codec_available;
+#[cfg(windows)]
+pub use codec::install_codec;
 pub(crate) use codec::{Decoder, DecoderControl};
-pub use codec::{codec_available, install_codec};
+#[cfg(windows)]
+pub(crate) type Codec = std::path::PathBuf;
+#[cfg(target_os = "macos")]
+pub(crate) type Codec = codec::SystemCodec;
 
 pub const SAMPLE_RATE: u32 = 48_000;
 pub const CHANNELS: usize = 2;
@@ -73,6 +81,7 @@ pub(crate) fn failed(message: impl std::fmt::Display) -> Error {
     }
 }
 
+#[cfg(windows)]
 fn device_error(error: wasapi::WasapiError) -> Error {
     let code = match &error {
         wasapi::WasapiError::Windows(error) | wasapi::WasapiError::RegisterNotifications(error) => {
@@ -159,7 +168,9 @@ impl Buffer {
 
     fn render(&mut self, frames: usize) -> Result<Block> {
         if frames > MAX_RENDER_FRAMES {
-            return Err(failed("Windows requested an oversized audio buffer"));
+            return Err(failed(
+                "The output device requested an oversized audio buffer",
+            ));
         }
         let mut bytes = Zeroizing::new(vec![0u8; frames * CHANNELS * 4]);
         let mut source_frames = 0;
@@ -201,6 +212,7 @@ struct Shared {
     buffer: Mutex<Buffer>,
     changed: Condvar,
     stopping: AtomicBool,
+    #[cfg(windows)]
     epoch: AtomicU64,
     rendered: AtomicU64,
     failed: AtomicBool,
@@ -255,6 +267,7 @@ impl Playback {
             buffer: Mutex::new(Buffer::new(settings, foreground)),
             changed: Condvar::new(),
             stopping: AtomicBool::new(false),
+            #[cfg(windows)]
             epoch: AtomicU64::new(0),
             rendered: AtomicU64::new(0),
             failed: AtomicBool::new(false),
@@ -320,9 +333,7 @@ impl Playback {
             && !self.shared.stopping.load(Ordering::Acquire)
             && !self.shared.failed.load(Ordering::Acquire)
         {
-            return Err(failed(
-                "The Windows audio output worker stopped unexpectedly",
-            ));
+            return Err(failed("The audio output worker stopped unexpectedly"));
         }
         Ok(())
     }
@@ -473,6 +484,7 @@ mod tests {
 
     #[test]
     #[ignore = "Plays only an original very quiet test tone on the user's default output; never captures audio"]
+    #[cfg(windows)]
     fn quiet_synthetic_audio_reaches_the_real_windows_output() {
         let directory = tempfile::tempdir().unwrap();
         let mut guard = audit::Audit::start(directory.path().join("audit")).unwrap();

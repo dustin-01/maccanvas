@@ -5,6 +5,7 @@ export struct FileRow { name: string, detail: string, directory: bool, regular: 
 
 export component SshSharingOverlay inherits Rectangle {
     in property <float> reveal: 1;
+    in property <bool> mac-client;
     in property <bool> clipboard-view: false;
     in-out property <bool> shared;
     in property <string> mode;
@@ -75,13 +76,13 @@ export component SshSharingOverlay inherits Rectangle {
                     spacing: 12px;
                     if root.vnc-available : CheckBox { text: "Share plain-text clipboard over VNC"; checked <=> root.shared; toggled => { root.changed(); } }
                     Text { text: root.mode; color: GlassTheme.accent; font-size: 12px; wrap: word-wrap; }
-                    if root.vnc-available : Text { text: "Ctrl+V sends Windows text when pasting into your Mac. Incoming Mac text can replace your Windows clipboard while the viewer is active. Clipboard contents are never logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
-                    if root.vnc-available : Button { text: "Paste Windows text"; enabled: root.shared; clicked => { root.paste-text(); } }
+                    if root.vnc-available : Text { text: root.mac-client ? "Command+V sends local text to the remote Mac. Incoming text can replace your clipboard while the viewer is active." : "Ctrl+V sends Windows text when pasting into your Mac. Incoming Mac text can replace your Windows clipboard while the viewer is active. Clipboard contents are never logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    if root.vnc-available : Button { text: root.mac-client ? "Paste local text" : "Paste Windows text"; enabled: root.shared; clicked => { root.paste-text(); } }
                     if root.vnc-available : Text { text: "VNC clipboard traffic is not encrypted. Use a VPN. Files, images, and rich text are not shared."; color: GlassTheme.muted; wrap: word-wrap; font-size: 12px; }
                     Text { text: "Encrypted SSH clipboard"; color: GlassTheme.ink; font-size: 16px; font-weight: 600; }
                     HorizontalLayout {
                         Button { text: "Copy Mac text"; enabled: root.connected && !root.busy; clicked => { root.copy-text(); } }
-                        Button { text: "Send Windows text"; enabled: root.connected && !root.busy; clicked => { root.send-text(); } }
+                        Button { text: root.mac-client ? "Send local text" : "Send Windows text"; enabled: root.connected && !root.busy; clicked => { root.send-text(); } }
                     }
                     if root.connected : Button { text: "Disconnect SSH"; enabled: !root.busy; clicked => { root.disconnect(); } }
                     Text { text: "Unicode clipboard uses this SSH account's logged-in Mac desktop. No images, rich text, or clipboard contents are logged."; color: GlassTheme.muted; wrap: word-wrap; font-size: 11px; }
@@ -112,7 +113,7 @@ export component SshSharingOverlay inherits Rectangle {
                         Rectangle { background: transparent; horizontal-stretch: 1; }
                     }
                     if root.has-saved : CheckBox { text: "Use saved Mac login"; checked <=> root.use-saved; enabled: !root.connecting; }
-                    if root.use-saved : Text { text: "MacCanvas verifies the SSH host before using your saved login. Your Windows Hello preference applies."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
+                    if root.use-saved : Text { text: "MacCanvas verifies the SSH host before using your saved login. Your saved-login verification preference applies."; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
                     if !root.use-saved : VerticalLayout {
                         spacing: 9px;
                         LineEdit { text <=> root.username; placeholder-text: "Mac account short username"; enabled: !root.connecting; accessible-label: "SSH Mac username"; }

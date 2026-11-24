@@ -37,7 +37,7 @@ export component AboutOverlay inherits Rectangle {
             ScrollView {
                 VerticalLayout {
                     spacing: 15px; padding-right: 8px;
-                    Text { text: "Your Mac. Your Windows screen."; color: GlassTheme.ink; font-size: 17px; font-weight: 600; }
+                    Text { text: "macOS Screen Sharing viewer"; color: GlassTheme.ink; font-size: 17px; font-weight: 600; }
                     Text { text: "Built by " + root.author; color: GlassTheme.muted; wrap: word-wrap; font-size: 13px; }
                     HorizontalLayout {
                         Button { text: "GitHub profile"; clicked => { root.open-link(0); } }

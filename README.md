@@ -2,8 +2,7 @@
 
 # MacCanvas
 
-A lightweight Windows viewer for macOS Screen Sharing.
-One portable viewer. No extra DLLs or subscription.
+A lightweight viewer for macOS Screen Sharing, with Windows and macOS clients.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/images/connections-dark.png">
@@ -28,7 +27,18 @@ One portable viewer. No extra DLLs or subscription.
 - **Clipboard and files:** opt-in VNC text sharing, encrypted Unicode clipboard, and verified SFTP file transfers.
 - **Local security audit:** structured JSONL evidence, process ancestry, connection history, and file-transfer receipts.
 
-## Install
+## Build on macOS
+
+Install the Xcode Command Line Tools and rustup, then run this from the repository root:
+
+```sh
+python3 scripts/build_macos.py
+open dist/MacCanvas.app
+```
+
+The script builds a release bundle for the current Mac and signs it locally. The macOS viewer uses the same VNC, Apple High Performance, and SSH sessions as the Windows viewer. HEVC uses the bundled libde265 software decoder. Saved logins use Keychain, with optional Touch ID or Mac password verification. Audio uses AudioToolbox and Core Audio. To update a local macOS build, rerun the script.
+
+## Install on Windows
 
 **Windows 10/11 x64**, PowerShell 5.1+. Run as your normal user:
 

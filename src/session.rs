@@ -62,6 +62,7 @@ struct Control {
     cancelled: AtomicBool,
     foreground: Arc<AtomicBool>,
     socket: Mutex<Option<TcpStream>>,
+    #[cfg(windows)]
     gpu_frame: Mutex<Option<Arc<crate::render::gpu::nvdec::Frame>>>,
     frame_notifier: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
     clipboard_enabled: AtomicBool,
@@ -76,6 +77,7 @@ impl Control {
             cancelled: AtomicBool::new(false),
             foreground: Arc::new(AtomicBool::new(true)),
             socket: Mutex::new(None),
+            #[cfg(windows)]
             gpu_frame: Mutex::new(None),
             frame_notifier: Mutex::new(None),
             clipboard_enabled: AtomicBool::new(clipboard),
@@ -137,6 +139,7 @@ impl Session {
         Ok(())
     }
 
+    #[cfg(windows)]
     pub fn take_gpu_frame(&self) -> Result<Option<Arc<crate::render::gpu::nvdec::Frame>>> {
         Ok(self
             .control

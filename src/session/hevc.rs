@@ -171,6 +171,7 @@ pub(super) fn run(
             }
             match frame {
                 apple_hps::Frame::Software(frame) => {
+                    #[cfg(windows)]
                     control
                         .gpu_frame
                         .lock()
@@ -181,6 +182,7 @@ pub(super) fn run(
                         .map_err(|_| Error::Display("Frame queue is unavailable".into()))? =
                         Some(Arc::new(frame));
                 }
+                #[cfg(windows)]
                 apple_hps::Frame::Gpu(frame) => {
                     frames
                         .lock()
