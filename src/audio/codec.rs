@@ -120,7 +120,8 @@ pub fn install_codec(scope: &Scope) -> Result<PathBuf> {
         .tempfile_in(directory)?;
     audit::windows::protect(staged.path(), &sid, false)?;
     let url = format!(
-        "https://github.com/false00/maccanvas/releases/download/v{}/{}",
+        "{}/releases/download/v{}/{}",
+        crate::REPOSITORY,
         crate::VERSION,
         audio_codec_tool::ASSET
     );

@@ -50,7 +50,7 @@ $settings = @{
 [IO.File]::WriteAllText((Join-Path $data 'settings.json'), ($settings | ConvertTo-Json -Depth 8))
 $oldHash = (Get-FileHash -LiteralPath $exe).Hash.ToLowerInvariant()
 $receiptPath = Join-Path $temporary '.maccanvas-install.json'
-[IO.File]::WriteAllText($receiptPath, (@{ repository = 'false00/maccanvas'; version = 'v0.2.1'; sha256 = $oldHash } | ConvertTo-Json))
+[IO.File]::WriteAllText($receiptPath, (@{ repository = 'dustin-01/maccanvas'; version = 'v0.2.1'; sha256 = $oldHash } | ConvertTo-Json))
 $start = [Diagnostics.ProcessStartInfo]::new()
 $start.FileName = $exe
 $start.Arguments = "--data-dir `"$data`""

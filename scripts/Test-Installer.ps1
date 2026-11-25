@@ -30,7 +30,7 @@ function Set-Fixture([string]$Version, [byte]$Marker) {
     $script:binary[300] = $Marker
     $script:hash = Get-MacCanvasHash $script:binary
     $script:checksums = [Text.Encoding]::UTF8.GetBytes("$script:hash  MacCanvas-windows-x64.exe`n$('a' * 64)  MacCanvas-audio-windows-x64.exe`n")
-    $base = "https://github.com/false00/maccanvas/releases/download/$Version"
+    $base = "https://github.com/dustin-01/maccanvas/releases/download/$Version"
     $script:release = [pscustomobject]@{
         tag_name = $Version; draft = $false; prerelease = $false
         assets = @(
@@ -43,6 +43,9 @@ function Set-Fixture([string]$Version, [byte]$Marker) {
 function Receive-MacCanvasBytes($Client, [uri]$Uri, [long]$Maximum) {
     Assert-MacCanvasUrl $Uri
     if ($Uri.DnsSafeHost -eq 'api.github.com') {
+        if ($Uri.AbsolutePath -cnotin @('/repos/dustin-01/maccanvas/releases/latest', "/repos/dustin-01/maccanvas/releases/tags/$($script:release.tag_name)")) {
+            throw "Unexpected release metadata endpoint: $Uri"
+        }
         return ,[Text.Encoding]::UTF8.GetBytes(($script:release | ConvertTo-Json -Depth 8))
     }
     if ($Uri.AbsolutePath.EndsWith('/SHA256SUMS.txt')) { return ,$script:checksums }
@@ -87,6 +90,10 @@ try {
     Assert-Test (@($shortcutPaths | Where-Object { Test-Path -LiteralPath $_ }).Count -eq 0) 'NoShortcut creates neither Start menu nor Desktop links'
     $again = Install-MacCanvas -Version v0.1.0 -InstallDirectory $managed -NoLaunch -NoShortcut
     Assert-Test ($again.Version -ceq 'v0.1.0') 'repeat install succeeds'
+    $receiptPath = Join-Path $managed '.maccanvas-install.json'
+    $legacyReceipt = Read-MacCanvasReceipt $managed
+    $legacyReceipt.repository = 'false00/maccanvas'
+    [IO.File]::WriteAllText($receiptPath, ($legacyReceipt | ConvertTo-Json))
     $oldHash = $script:hash
     Set-Fixture 'v0.1.1' 2
     $receiptLock = [IO.File]::Open((Join-Path $managed '.maccanvas-install.json'), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -95,6 +102,7 @@ try {
     Assert-Test ((Get-FileHash -LiteralPath $first.Executable).Hash -ieq $oldHash) 'failed upgrade preserves previous executable'
     $updated = Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch -NoShortcut
     Assert-Test ((Get-FileHash -LiteralPath $updated.Executable).Hash -ieq $script:hash) 'upgrade replaces only managed executable'
+    Assert-Test ((Read-MacCanvasReceipt $managed).repository -ceq 'dustin-01/maccanvas') 'upgrade migrates the upstream receipt to the fork'
     $before = [IO.File]::ReadAllBytes($updated.Executable)
     $script:binary[301] = 99
     Assert-Throws { Install-MacCanvas -Version latest -InstallDirectory $managed -NoLaunch -NoShortcut } 'digest mismatch refuses install'

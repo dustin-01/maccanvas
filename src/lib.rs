@@ -6,7 +6,7 @@ pub const TARGET: &str = env!("MACCANVAS_TARGET");
 pub const RUSTC: &str = env!("MACCANVAS_RUSTC");
 pub const AUTHOR: &str = "@false00";
 pub const AUTHOR_GITHUB: &str = "https://github.com/false00";
-pub const REPOSITORY: &str = "https://github.com/false00/maccanvas";
+pub const REPOSITORY: &str = env!("CARGO_PKG_REPOSITORY");
 
 pub mod apple_hps;
 pub mod audio;

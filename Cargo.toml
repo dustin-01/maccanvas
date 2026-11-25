@@ -4,8 +4,8 @@ version = "0.5.7"
 edition = "2024"
 rust-version = "1.92"
 license = "AGPL-3.0-or-later"
-description = "A lightweight Windows and macOS viewer for macOS Screen Sharing"
-repository = "https://github.com/false00/maccanvas"
+description = "A lightweight Windows VNC viewer built for macOS Screen Sharing"
+repository = "https://github.com/dustin-01/maccanvas"
 build = "build.rs"
 
 [dependencies]

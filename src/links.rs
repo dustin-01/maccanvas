@@ -10,9 +10,9 @@ pub fn open_about_link(index: i32) -> Result<()> {
     let link = match index {
         0 => crate::AUTHOR_GITHUB,
         1 => crate::REPOSITORY,
-        2 => "https://github.com/false00/maccanvas/releases/latest",
+        2 => concat!(env!("CARGO_PKG_REPOSITORY"), "/releases/latest"),
         3 => "https://curl.red",
-        4 => "https://github.com/false00/maccanvas/blob/main/LICENSE",
+        4 => concat!(env!("CARGO_PKG_REPOSITORY"), "/blob/main/LICENSE"),
         _ => return Err(Error::Configuration("Unknown About link".into())),
     };
     open(link.as_ref())

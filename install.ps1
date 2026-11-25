@@ -94,7 +94,7 @@ param(
         $assets = @($Release.assets | Where-Object { $_.name -ceq $Name })
         if ($assets.Count -ne 1) { throw "Release must contain exactly one $Name asset." }
         $asset = $assets[0]
-        $expected = "https://github.com/false00/maccanvas/releases/download/$($Release.tag_name)/$Name"
+        $expected = "https://github.com/dustin-01/maccanvas/releases/download/$($Release.tag_name)/$Name"
         if ($asset.browser_download_url -cne $expected -or [long]$asset.size -le 0 -or
             [long]$asset.size -gt $Maximum -or $asset.digest -notmatch '^sha256:[a-fA-F0-9]{64}$') {
             throw "Release asset $Name has an invalid source, size, or SHA-256 digest."
@@ -136,7 +136,7 @@ param(
         $path = Join-Path $Directory '.maccanvas-install.json'
         if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw 'This directory is not managed by the MacCanvas installer.' }
         $receipt = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
-        if ($receipt.repository -cne 'false00/maccanvas' -or $receipt.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
+        if ($receipt.repository -cnotin @('dustin-01/maccanvas', 'false00/maccanvas') -or $receipt.sha256 -notmatch '^[a-fA-F0-9]{64}$') {
             throw 'The MacCanvas installation receipt is invalid.'
         }
         $executable = Join-Path $Directory 'MacCanvas.exe'
@@ -222,7 +222,7 @@ param(
         $client = New-MacCanvasClient
         try {
             $endpoint = if ($Version -eq 'latest') { 'latest' } else { "tags/$Version" }
-            $metadata = Receive-MacCanvasBytes $client ([uri]"https://api.github.com/repos/false00/maccanvas/releases/$endpoint") 262144
+            $metadata = Receive-MacCanvasBytes $client ([uri]"https://api.github.com/repos/dustin-01/maccanvas/releases/$endpoint") 262144
             $release = [Text.Encoding]::UTF8.GetString($metadata) | ConvertFrom-Json
             if ($release.draft -or $release.prerelease -or $release.tag_name -notmatch '^v[0-9]+\.[0-9]+\.[0-9]+$' -or
                 ($Version -ne 'latest' -and $release.tag_name -cne $Version)) {
@@ -251,7 +251,7 @@ param(
         $preserveBackup = $false
         try {
             [IO.File]::WriteAllBytes($stage, $bytes)
-            $receipt = @{ repository = 'false00/maccanvas'; version = $release.tag_name; sha256 = $expected }
+            $receipt = @{ repository = 'dustin-01/maccanvas'; version = $release.tag_name; sha256 = $expected }
             # Older viewers reject receipt fields they do not recognize.
             if ([version]$release.tag_name.Substring(1) -ge [version]'0.3.1') { $receipt.shortcuts = -not $NoShortcut }
             [IO.File]::WriteAllText($stageReceipt, ($receipt | ConvertTo-Json), [Text.UTF8Encoding]::new($false))

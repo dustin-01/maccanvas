@@ -43,14 +43,14 @@ The script builds a release bundle for the current Mac and signs it locally. The
 **Windows 10/11 x64**, PowerShell 5.1+. Run as your normal user:
 
 ```powershell
-irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/dustin-01/maccanvas/main/install.ps1 | iex
 ```
 
 Run the same command to update. The installer verifies SHA-256 digests and creates
 Desktop and Start-menu shortcuts. Installed copies repair missing or outdated shortcuts
 on launch, including after an in-app update. Use `-NoShortcut` to skip both.
 Prefer portable? Download `MacCanvas-windows-x64.exe`
-from [Releases](https://github.com/false00/maccanvas/releases/latest) and run it.
+from [Releases](https://github.com/dustin-01/maccanvas/releases/latest) and run it.
 
 When a newer version is available, choose **Update & restart** or **Later**.
 Disconnect first if a Mac session is active. The app verifies the download and
@@ -245,7 +245,7 @@ Logs contain sensitive metadata and are **not encrypted or tamper-proof**.
 Close MacCanvas, then:
 
 ```powershell
-& ([scriptblock]::Create((irm https://raw.githubusercontent.com/false00/maccanvas/main/install.ps1))) -Uninstall
+& ([scriptblock]::Create((irm https://raw.githubusercontent.com/dustin-01/maccanvas/main/install.ps1))) -Uninstall
 ```
 
 The managed application and its Desktop and Start-menu shortcuts are removed. Profiles, credentials, downloaded audio components, and audit logs are

@@ -34,7 +34,8 @@ use serde_json::json;
 pub(crate) mod http;
 mod shortcuts;
 
-const REPOSITORY: &str = "false00/maccanvas";
+const REPOSITORY: &str = "dustin-01/maccanvas";
+const LEGACY_RECEIPT_REPOSITORY: &str = "false00/maccanvas";
 const ASSET: &str = "MacCanvas-windows-x64.exe";
 const MAX_EXE: u64 = 100 * 1024 * 1024;
 const MAX_METADATA: u64 = 256 * 1024;
@@ -233,8 +234,10 @@ fn read_receipt(executable: &Path) -> Result<Option<Receipt>> {
                 ));
             }
             let receipt: Receipt = serde_json::from_slice(&fs::read(path)?).map_err(failed)?;
-            if receipt.repository != REPOSITORY
-                || !valid_hash(&receipt.sha256)
+            if !matches!(
+                receipt.repository.as_str(),
+                REPOSITORY | LEGACY_RECEIPT_REPOSITORY
+            ) || !valid_hash(&receipt.sha256)
                 || receipt.sha256.to_ascii_lowercase() != file_hash(executable)?
             {
                 return Err(failed(
@@ -325,7 +328,7 @@ fn install_at(
         write_receipt(
             &receipt_path,
             &Receipt {
-                repository: old.repository.clone(),
+                repository: REPOSITORY.into(),
                 version: release.tag.clone(),
                 sha256: release.sha256.clone(),
                 shortcuts: old.shortcuts,
@@ -657,7 +660,7 @@ mod tests {
         bytes[152..154].copy_from_slice(&[0x0b, 0x02]);
         let release = Release {
             version: Version::new(9, 0, 0), tag: "v9.0.0".into(), size: bytes.len() as u64,
-            sha256: format!("{:x}", Sha256::digest(&bytes)), url: "https://github.com/false00/maccanvas/releases/download/v9.0.0/MacCanvas-windows-x64.exe".into(),
+            sha256: format!("{:x}", Sha256::digest(&bytes)), url: "https://github.com/dustin-01/maccanvas/releases/download/v9.0.0/MacCanvas-windows-x64.exe".into(),
         };
         (bytes, release)
     }
@@ -733,7 +736,7 @@ mod tests {
             write_receipt(
                 &receipt,
                 &Receipt {
-                    repository: REPOSITORY.into(),
+                    repository: LEGACY_RECEIPT_REPOSITORY.into(),
                     version: "v0.1.1".into(),
                     sha256: file_hash(&executable).unwrap(),
                     shortcuts,
@@ -750,6 +753,7 @@ mod tests {
             let updated: Receipt = serde_json::from_slice(&fs::read(&receipt).unwrap()).unwrap();
             assert_eq!(updated.sha256, file_hash(&executable).unwrap());
             assert_eq!(updated.version, release.tag);
+            assert_eq!(updated.repository, REPOSITORY);
             assert_eq!(updated.shortcuts, shortcuts);
         }
     }
